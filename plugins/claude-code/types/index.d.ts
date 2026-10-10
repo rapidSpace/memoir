@@ -37,7 +37,21 @@ export type MemoirTurnMetrics = {
   latencySamples: number
 }
 
-export type MemoirTab = 'recent' | 'taxonomy' | 'metrics'
+/** One memory key on the current branch, compared with the same key on main. */
+export type MemoirMemory = {
+  key: string
+  content: string | null
+  /** `added`: not on main; `changed`: on main with another value; else `same`. */
+  status: 'same' | 'added' | 'changed'
+}
+
+export type MemoirMemories = {
+  items: MemoirMemory[]
+  /** The branch the items were compared with (`main`), or null when no comparison ran. */
+  base: string | null
+}
+
+export type MemoirTab = 'recent' | 'taxonomy' | 'metrics' | 'memories'
 
 declare module 'claude-code' {
   interface PluginState {
@@ -57,6 +71,10 @@ declare module 'claude-code' {
       taxonomy: Record<string, number>
       /** Branch → its turn accumulator, from the `metrics.turn.*` keys. */
       metrics: Record<string, MemoirTurnMetrics>
+      /** Every key on the branch with its value and how it compares with main. */
+      memories: MemoirMemories
+      /** Memories tab: show every key instead of only what differs from main. */
+      showAll: boolean
     }
   }
 }

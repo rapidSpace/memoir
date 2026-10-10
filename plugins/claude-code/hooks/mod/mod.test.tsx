@@ -48,7 +48,12 @@ const CONTENT: Record<string, string> = {
     latency_samples: 5,
   }),
   'preferences.tools.git': 'Prefer rebase over merge for feature branches',
+  'knowledge.technical.build': 'pnpm 11 blocks build scripts unless whitelisted',
 }
+
+/** Subjects of the commits this branch made since leaving main, and of main's own history. */
+const BRANCH_SUBJECTS = ['Store knowledge.technical.build in default', 'Store knowledge.decisions.architecture in default', 'Store metrics.turn.main in default'].join('\n') + '\n'
+const MAIN_SUBJECTS = ['Store workflow.coding.gates in default', 'Store knowledge.decisions.architecture in default', 'Store metrics.turn.main in default', 'Initialize memoir store'].join('\n') + '\n'
 
 const SUMMARY_JSON = JSON.stringify({
   prefix_counts: {
@@ -113,7 +118,9 @@ function world(on: On, overrides: Partial<World> = {}) {
     if (argv.includes('derive-store-path.sh')) {
       stdout = w.store ?? ''
       exitCode = w.store === null ? 1 : 0
-    } else if (argv.includes(' log ')) stdout = w.log
+    } else if (argv.includes('main..HEAD')) stdout = BRANCH_SUBJECTS
+    else if (argv.includes(' log main ')) stdout = MAIN_SUBJECTS
+    else if (argv.includes(' log ')) stdout = w.log
     else if (argv.includes('rev-list')) stdout = w.count
     else if (argv.includes(' get ') && w.cliFails) exitCode = 1
     else if (argv.includes(' get ')) {
@@ -284,6 +291,8 @@ test('pane: recent feed hides metrics until toggled; taxonomy tab groups by firs
   expect(ran.text).toBe('memoir pane opened.')
 
   const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /differ from main|memories on main/ })).toBeDefined() // Memories opens first
+  await ui.press({ key: 'tab-recent' })
   expect(await ui.find({ type: 'Text', text: 'workflow.coding.gates' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Run make format/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'metrics.turn.main' })).toBeUndefined()
@@ -305,6 +314,7 @@ test('pane: recent feed hides metrics until toggled; taxonomy tab groups by firs
 test('a content read that fails while the Stop hook is still writing is retried on the next refresh', async ($, on) => {
   const { w, clock } = await boot($, on, { cliFails: true })
   let ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-recent' })
   expect(await ui.find({ type: 'Text', text: 'workflow.coding.gates' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /content unavailable/ })).toBeDefined()
 
@@ -356,4 +366,50 @@ test('metrics tab charts every branch with the current one first', async ($, on)
   expect(await ui.find({ type: 'Text', text: /^ 66\.8$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^ 312\.4$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^ 28k$/ })).toBeDefined()
+})
+
+test('diffMemories: a key written on the branch is added unless main ever stored it', () => {
+  const current = new Map<string, string | null>([
+    ['a.b.c', 'same'],
+    ['a.b.d', 'new here'],
+    ['a.b.e', 'edited'],
+  ])
+  const diff = { written: new Set(['a.b.d', 'a.b.e']), onBase: new Set(['a.b.c', 'a.b.e']) }
+  expect(fmt.diffMemories(['a.b.e', 'a.b.c', 'a.b.d'], current, diff)).toEqual([
+    { key: 'a.b.c', content: 'same', status: 'same' },
+    { key: 'a.b.d', content: 'new here', status: 'added' },
+    { key: 'a.b.e', content: 'edited', status: 'changed' },
+  ])
+  expect(fmt.diffMemories(['a.b.d'], current, null)).toEqual([{ key: 'a.b.d', content: 'new here', status: 'same' }])
+  expect(fmt.parseStoredKeys('Store x.y.z in default\nStore q in other\nMerge branch\n')).toEqual(new Set(['x.y.z']))
+})
+
+test('memories tab (the default) diffs to main on a branch, t shows all', async ($, on) => {
+  const { w } = await boot($, on, { head: 'ref: refs/heads/feat/x\n' })
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: '3 memories · 2 differ from main' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^knowledge\.technical\.build/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^knowledge\.decisions\.architecture/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^workflow\.coding\.gates/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '+ ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '~ ' })).toBeDefined()
+  // Main is compared from git history: never `get --branch` (the CLI would check main out).
+  expect(w.runs.some(argv => argv.includes('main..HEAD'))).toBe(true)
+  expect(w.runs.some(argv => argv.includes('--branch'))).toBe(false)
+
+  await ui.press({ key: 'all' })
+  expect(await ui.find({ type: 'Text', text: /^workflow\.coding\.gates/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^metrics\.turn\.main/ })).toBeUndefined()
+  await ui.press({ key: 'metrics' })
+  expect(await ui.find({ type: 'Text', text: /^metrics\.turn\.main/ })).toBeDefined()
+})
+
+test('memories tab on main lists everything and offers no diff toggle', async ($, on) => {
+  const { w } = await boot($, on)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-memories' })
+  expect(await ui.find({ type: 'Text', text: '3 memories on main' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^workflow\.coding\.gates/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'all' })).toBeUndefined()
+  expect(w.runs.some(argv => argv.includes('main..HEAD'))).toBe(false)
 })

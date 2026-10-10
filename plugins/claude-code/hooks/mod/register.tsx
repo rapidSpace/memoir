@@ -12,7 +12,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { MemoirCapture, MemoirStatus, MemoirTab, MemoirTurnMetrics } from '../../types'
+import type { MemoirCapture, MemoirMemories, MemoirStatus, MemoirTab, MemoirTurnMetrics } from '../../types'
 import * as fmt from './format'
 import { renderPane } from './pane'
 import * as store from './store'
@@ -28,11 +28,13 @@ const status = atom({ plugin: 'memoir', key: 'status' } as const, EMPTY_STATUS)
 const captures = atom({ plugin: 'memoir', key: 'captures' } as const, [] as MemoirCapture[])
 const order = atom({ plugin: 'memoir', key: 'order' } as const, [] as string[])
 const turnBaseline = atom({ plugin: 'memoir', key: 'turnBaseline' } as const, null as string | null)
-const tab = atom({ plugin: 'memoir', key: 'tab' } as const, 'recent' as MemoirTab)
+const tab = atom({ plugin: 'memoir', key: 'tab' } as const, 'memories' as MemoirTab)
 const showMetrics = atom({ plugin: 'memoir', key: 'showMetrics' } as const, false)
 const expanded = atom({ plugin: 'memoir', key: 'expanded' } as const, [] as string[])
 const taxonomy = atom({ plugin: 'memoir', key: 'taxonomy' } as const, {} as Record<string, number>)
 const metrics = atom({ plugin: 'memoir', key: 'metrics' } as const, {} as Record<string, MemoirTurnMetrics>)
+const memoryList = atom({ plugin: 'memoir', key: 'memories' } as const, { items: [], base: null } as MemoirMemories)
+const showAll = atom({ plugin: 'memoir', key: 'showAll' } as const, false)
 
 export const register: Register = on => {
   // Rebuilt by `session.start` (which a hot reload re-runs); the drawn state
@@ -97,16 +99,27 @@ export const register: Register = on => {
       const commits = await store.countCommits(host, path)
       const tree = await store.readTaxonomy(host, path)
 
-      // The per-branch turn accumulators change every turn, so they are read
-      // whole on each refresh: one batched `get` for all of them.
-      const metricKeys = Object.keys(tree).filter(k => k.startsWith(fmt.TURN_METRICS_PREFIX))
+      // Every default-namespace key's value, in one batched `get`: the Memories
+      // tab lists them, and the per-branch turn accumulators among them feed
+      // the Metrics tab. Read whole on each refresh since metrics change every turn.
+      const keys = Object.keys(tree)
+      const raw = await store.fetchContents(host, path, keys.map(key => ({ key, namespace: 'default' })))
+      const current = new Map<string, string | null>()
+      for (const key of keys) current.set(key, raw.get(`default:${key}`) ?? null)
+
       const turnMetrics: Record<string, MemoirTurnMetrics> = {}
-      if (metricKeys.length > 0) {
-        const raw = await store.fetchContents(host, path, metricKeys.map(key => ({ key, namespace: 'default' })))
-        for (const key of metricKeys) {
-          const parsed = fmt.parseTurnMetrics(raw.get(`default:${key}`))
-          if (parsed) turnMetrics[key.slice(fmt.TURN_METRICS_PREFIX.length)] = parsed
-        }
+      for (const key of keys) {
+        if (!key.startsWith(fmt.TURN_METRICS_PREFIX)) continue
+        const parsed = fmt.parseTurnMetrics(current.get(key))
+        if (parsed) turnMetrics[key.slice(fmt.TURN_METRICS_PREFIX.length)] = parsed
+      }
+
+      // Off main, compare with main from git history (never a checkout).
+      const base = head.branch && head.branch !== 'main' ? 'main' : null
+      const diff = base ? await store.readBranchDiff(host, path, base) : null
+      const compared: MemoirMemories = {
+        items: fmt.diffMemories(keys, current, diff),
+        base: diff ? base : null,
       }
 
       await update($, status, () => ({ store: path, branch: head.branch, head: log.order[0] ?? null, memories, commits }))
@@ -114,6 +127,7 @@ export const register: Register = on => {
       await update($, captures, () => log.entries.map(c => ({ ...c, content: contents.get(c.sha) ?? null })))
       await update($, taxonomy, () => tree)
       await update($, metrics, () => turnMetrics)
+      await update($, memoryList, () => compared)
     }
 
     refresh = (force = false) => {
@@ -189,10 +203,13 @@ export const register: Register = on => {
       baseline: await read($, turnBaseline),
       taxonomy: await read($, taxonomy),
       metrics: await read($, metrics),
+      memories: await read($, memoryList),
+      showAll: await read($, showAll),
       expanded: await read($, expanded),
       actions: {
         pickTab: next => update($, tab, () => next),
         toggleMetrics: () => update($, showMetrics, v => !v),
+        toggleAll: () => update($, showAll, v => !v),
         toggleGroup: name =>
           update($, expanded, names => (names.includes(name) ? names.filter(n => n !== name) : [...names, name])),
         refresh: () => refresh(true),

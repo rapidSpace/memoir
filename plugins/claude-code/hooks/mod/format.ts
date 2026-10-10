@@ -2,7 +2,7 @@
 // and rendering the one-line hint and the plain-text fallback. Nothing here
 // touches `$`, so every rule is unit-testable without a store.
 
-import type { MemoirCapture, MemoirStatus, MemoirTurnMetrics } from '../../types'
+import type { MemoirCapture, MemoirMemory, MemoirStatus, MemoirTurnMetrics } from '../../types'
 
 export type LogEntry = Omit<MemoirCapture, 'content'>
 
@@ -29,6 +29,16 @@ export function parseLog(stdout: string): ParsedLog {
     entries.push({ sha, at, key: match[1]!, namespace: match[2]! })
   }
   return { order, entries }
+}
+
+/** The keys named by `Store <key> in <namespace>` subjects, default namespace only. */
+export function parseStoredKeys(subjects: string): Set<string> {
+  const keys = new Set<string>()
+  for (const line of subjects.split('\n')) {
+    const match = SUBJECT.exec(line.trim())
+    if (match && match[2] === 'default') keys.add(match[1]!)
+  }
+  return keys
 }
 
 export const isMetric = (key: string): boolean => key.startsWith('metrics.')
@@ -255,4 +265,23 @@ export function metricCharts(metrics: Readonly<Record<string, MemoirTurnMetrics>
 export function bar(value: number, max: number, width: number): string {
   if (value <= 0 || max <= 0 || width <= 0) return ''
   return '█'.repeat(Math.max(1, Math.round((value / max) * width)))
+}
+
+/**
+ * Compare the branch's keys with main from git history: a key the branch
+ * wrote since leaving main is `changed` when main's history ever stored it,
+ * else `added`; everything else is `same`. With no comparison (`diff` null)
+ * every key is `same`; the caller records that no base was compared.
+ */
+export function diffMemories(
+  keys: readonly string[],
+  current: ReadonlyMap<string, string | null>,
+  diff: { written: ReadonlySet<string>; onBase: ReadonlySet<string> } | null,
+): MemoirMemory[] {
+  return [...keys].sort().map(key => {
+    const content = current.get(key) ?? null
+    let status: MemoirMemory['status'] = 'same'
+    if (diff && diff.written.has(key)) status = diff.onBase.has(key) ? 'changed' : 'added'
+    return { key, content, status }
+  })
 }

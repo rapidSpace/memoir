@@ -3,7 +3,7 @@
 
 import type { EngineInterface, RenderElement } from 'claude-code'
 
-import type { MemoirCapture, MemoirStatus, MemoirTab, MemoirTurnMetrics } from '../../types'
+import type { MemoirCapture, MemoirMemories, MemoirStatus, MemoirTab, MemoirTurnMetrics } from '../../types'
 import * as fmt from './format'
 
 export type PaneView = {
@@ -19,10 +19,13 @@ export type PaneView = {
   baseline: string | null
   taxonomy: Readonly<Record<string, number>>
   metrics: Readonly<Record<string, MemoirTurnMetrics>>
+  memories: MemoirMemories
+  showAll: boolean
   expanded: readonly string[]
   actions: {
     pickTab: (tab: MemoirTab) => unknown
     toggleMetrics: () => unknown
+    toggleAll: () => unknown
     toggleGroup: (name: string) => unknown
     refresh: () => unknown
   }
@@ -41,13 +44,16 @@ export function renderPane(view: PaneView): RenderElement {
   const header = (
     <Box justifyContent="space-between">
       <Box gap={2}>
-        <Button key="tab-recent" plain hotkey="1" dimColor={view.tab !== 'recent'} onPress={() => void actions.pickTab('recent')}>
+        <Button key="tab-memories" plain hotkey="1" dimColor={view.tab !== 'memories'} onPress={() => void actions.pickTab('memories')}>
+          Memories
+        </Button>
+        <Button key="tab-recent" plain hotkey="2" dimColor={view.tab !== 'recent'} onPress={() => void actions.pickTab('recent')}>
           Recent
         </Button>
-        <Button key="tab-taxonomy" plain hotkey="2" dimColor={view.tab !== 'taxonomy'} onPress={() => void actions.pickTab('taxonomy')}>
+        <Button key="tab-taxonomy" plain hotkey="3" dimColor={view.tab !== 'taxonomy'} onPress={() => void actions.pickTab('taxonomy')}>
           Taxonomy
         </Button>
-        <Button key="tab-metrics" plain hotkey="3" dimColor={view.tab !== 'metrics'} onPress={() => void actions.pickTab('metrics')}>
+        <Button key="tab-metrics" plain hotkey="4" dimColor={view.tab !== 'metrics'} onPress={() => void actions.pickTab('metrics')}>
           Metrics
         </Button>
       </Box>
@@ -104,6 +110,56 @@ export function renderPane(view: PaneView): RenderElement {
     footer = (
       <Box justifyContent="space-between">
         {metricsButton}
+        {refreshButton}
+      </Box>
+    )
+  } else if (view.tab === 'memories') {
+    const { items, base } = view.memories
+    const visible = fmt.visibleCaptures(items, view.showMetrics)
+    const differing = visible.filter(m => m.status !== 'same')
+    // On main there is nothing to compare, so the tab shows everything.
+    const showAll = view.showAll || base === null
+    const shown = showAll ? visible : differing
+    const keyWidth = Math.min(32, Math.max(8, ...visible.map(m => m.key.length)))
+    const snippetWidth = Math.max(8, width - 2 - keyWidth - 2)
+    const summary =
+      base === null
+        ? `${fmt.plural(visible.length, 'memory', 'memories')}${status.branch === 'main' ? ' on main' : ' · no main branch to compare'}`
+        : `${fmt.plural(visible.length, 'memory', 'memories')} · ${differing.length === 1 ? '1 differs' : `${differing.length} differ`} from ${base}`
+    body = (
+      <Box flexDirection="column">
+        <Text dimColor>{summary}</Text>
+        {shown.length === 0 ? (
+          <Text dimColor>{base === null ? 'No memories yet.' : `Nothing differs from ${base}.`}</Text>
+        ) : (
+          shown.map(m => (
+            <Box>
+              {m.status === 'added' ? (
+                <Text color="diffAdded">+ </Text>
+              ) : m.status === 'changed' ? (
+                <Text color="warning">~ </Text>
+              ) : (
+                <Text dimColor>  </Text>
+              )}
+              <Text bold={m.status !== 'same'}>{m.key.padEnd(keyWidth).slice(0, keyWidth)}</Text>
+              <Text dimColor>{`  ${m.content ? fmt.wrapLines(m.content, snippetWidth, 1)[0] ?? '' : '(content unavailable)'}`}</Text>
+            </Box>
+          ))
+        )}
+      </Box>
+    )
+    footer = (
+      <Box justifyContent="space-between">
+        <Box gap={3}>
+          {base === null ? (
+            <Text dimColor> </Text>
+          ) : (
+            <Button key="all" plain hotkey="t" dimColor onPress={() => void actions.toggleAll()}>
+              {`show all (${view.showAll ? 'on' : 'off'})`}
+            </Button>
+          )}
+          {metricsButton}
+        </Box>
         {refreshButton}
       </Box>
     )

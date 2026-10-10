@@ -7,7 +7,7 @@
 
 import type { FsStat, ProcessRunInit, ProcessRunResult } from 'claude-code'
 
-import { parseHead, parseLog, type ParsedLog } from './format'
+import { parseHead, parseLog, parseStoredKeys, type ParsedLog } from './format'
 
 export type Host = {
   /** The plugin's folder (`$.plugin.root`). */
@@ -144,4 +144,23 @@ export async function readTaxonomy(host: Host, store: string): Promise<Record<st
   } catch {
     return {}
   }
+}
+
+/**
+ * Which keys this branch wrote since it left main (`main..HEAD`), and which
+ * keys main's own history has ever stored: enough to tell what the branch
+ * added or changed, from git metadata alone. Never `memoir get --branch`:
+ * the CLI routes that by checking main out and back, and a Stop-hook write
+ * in that window lands on main. Null when main cannot be compared.
+ */
+export async function readBranchDiff(
+  host: Host,
+  store: string,
+  base: string,
+): Promise<{ written: Set<string>; onBase: Set<string> } | null> {
+  const written = await run(host, ['git', '-C', store, 'log', `${base}..HEAD`, '--format=%s'])
+  if (written === null) return null
+  const onBase = await run(host, ['git', '-C', store, 'log', base, '--format=%s'])
+  if (onBase === null) return null
+  return { written: parseStoredKeys(written), onBase: parseStoredKeys(onBase) }
 }
