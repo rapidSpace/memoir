@@ -376,7 +376,7 @@ test('pane: recent feed hides metrics until toggled; t shows the taxonomy above 
   expect(await ui.find({ type: 'Text', text: /Run make format/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: `commit-${sha(3)}` })).toBeUndefined()
   // The mark and the title head the pane.
-  expect((await ui.findAll({ type: 'Text', text: /^[ ╭╮╯╰─]{9}$/ })).map(t => t.text)).toEqual([' ╭─────╮ ', '╭╯╭╮ ╭╮╰╮', '╰─╯╰─╯╰─╯'])
+  expect((await ui.findAll({ type: 'Text', text: /^[ ┏┓┛┗━]{9}$/ })).map(t => t.text)).toEqual([' ┏━━━━━┓ ', '┏┛┏┓ ┏┓┗┓', '┗━┛┗━┛┗━┛'])
   expect(await ui.find({ type: 'Text', text: 'memoir' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'status-branch', text: 'main' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'status-memories', text: '18 memories' })).toBeDefined()
