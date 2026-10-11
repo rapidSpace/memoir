@@ -107,7 +107,11 @@ export const register: Register = on => {
       fingerprint = fp
 
       const head = await store.readHead(host, path)
-      const log = await store.readLog(host, path)
+      // Off main the pane compares with main, and the Recent tab lists only
+      // the commits not on it.
+      const base = head.branch && head.branch !== 'main' ? 'main' : null
+      const since = base && head.branch ? await store.mergedAt(host, path, base, head.branch) : null
+      const log = await store.readLog(host, path, { base, since })
       // A miss is not cached: a refresh can fire while the Stop hook is still
       // writing, when `get` fails or finds nothing, so unknown contents are
       // asked for again on the next refresh (and on `r`).
@@ -147,9 +151,8 @@ export const register: Register = on => {
       // Off main, compare with main: the CLI's key-level diff reads both
       // commits from the tree (both values, never a checkout); a CLI without
       // it leaves the comparison to git history (which keys were written).
-      const base = head.branch && head.branch !== 'main' ? 'main' : null
       const changes = base ? await store.readKeyChanges(host, path, base) : null
-      const history = base && !changes ? await store.readBranchDiff(host, path, base) : null
+      const history = base && !changes ? await store.readBranchDiff(host, path, base, since) : null
       const compared: MemoirMemories = {
         items: fmt.diffMemories(keys, current, changes, history),
         base: changes || history ? base : null,

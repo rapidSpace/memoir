@@ -142,8 +142,8 @@ function world(on: On, overrides: Partial<World> = {}) {
       stdout = w.store ?? ''
       exitCode = w.store === null ? 1 : 0
     } else if (argv.includes('--grep=')) stdout = w.mergedAt
-    else if (argv.includes('--after=')) stdout = w.afterMerge
-    else if (argv.includes('main..HEAD')) stdout = BRANCH_SUBJECTS
+    else if (argv.includes('--after=')) stdout = argv.includes('--format=%s') ? w.afterMerge : w.log
+    else if (argv.includes('main..HEAD')) stdout = argv.includes('--format=%s') ? BRANCH_SUBJECTS : w.log
     else if (argv.includes(' log main ')) stdout = MAIN_SUBJECTS
     else if (argv.includes(' log ')) stdout = w.log
     else if (argv.includes('rev-list')) stdout = w.count
@@ -482,7 +482,7 @@ test('memories tab (the default): on a branch only the keys that differ from mai
   // Main is read through the CLI's key-level diff: never `get --branch` (the CLI would check main out).
   expect(w.runs.some(argv => argv.includes('diff') && argv.includes('main') && argv.includes('HEAD'))).toBe(true)
   expect(w.runs.some(argv => argv.includes('--branch'))).toBe(false)
-  expect(w.runs.some(argv => argv.includes('main..HEAD'))).toBe(false)
+  expect(w.runs.some(argv => argv.includes('main..HEAD') && argv.includes('--format=%s'))).toBe(false)
 
   await ui.input({ key: 'filter', text: 'BUILD', kind: 'change' })
   expect(await ui.find({ type: 'Button', key: 'mem-knowledge.technical.build' })).toBeDefined()
@@ -651,4 +651,25 @@ test('a commit on a memoir without key-level diffs shows the key\'s current valu
   expect(await ui.find({ type: 'Text', text: 'workflow.coding.gates now:' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^  Run make format, make lint/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /needs a memoir with key-level diffs/ })).toBeDefined()
+})
+
+test('recent tab on a branch lists only the commits not on main', async ($, on) => {
+  const { w, clock } = await boot($, on, { head: 'ref: refs/heads/feat/x\n' })
+  const log = w.runs.find(argv => argv.includes('log') && argv.includes('--format=%H%x09%ct%x09%s'))
+  expect(log!.slice(log!.indexOf('log'))).toEqual(['log', 'main..HEAD', '--format=%H%x09%ct%x09%s', '-n', '20'])
+  let ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-recent' })
+  expect(await ui.find({ type: 'Text', text: /^commits not on main/ })).toBeDefined()
+
+  // Everything merged into main: the branch has nothing of its own to list.
+  w.mergedAt = '2023-11-14T22:15:00+00:00\n'
+  w.log = ''
+  w.mtime = 2000
+  await ui.unmount()
+  await clock.advance(3000)
+  const after = w.runs.filter(argv => argv.includes('--after=2023-11-14T22:15:00+00:00') && argv.includes('--format=%H%x09%ct%x09%s'))
+  expect(after.length).toBeGreaterThan(0)
+  ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-recent' })
+  expect(await ui.find({ type: 'Text', text: 'Nothing beyond main yet.' })).toBeDefined()
 })

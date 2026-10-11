@@ -87,9 +87,27 @@ export async function fingerprint(host: Host, store: string): Promise<string> {
   return `${head.branch ?? ''}:${headMtime}:${refMtime}:${packedMtime}`
 }
 
-export async function readLog(host: Host, store: string): Promise<ParsedLog> {
-  const out = await run(host, ['git', '-C', store, 'log', '--format=%H%x09%ct%x09%s', '-n', String(LOG_WINDOW)])
+/** Which commits the Recent tab lists: on a branch, those not on `base` (after `since`, when main took a merge of the branch). */
+export type LogScope = { base: string | null; since: string | null }
+
+export async function readLog(host: Host, store: string, scope: LogScope = { base: null, since: null }): Promise<ParsedLog> {
+  const range = scope.since ? ['HEAD', `--after=${scope.since}`] : scope.base ? [`${scope.base}..HEAD`] : []
+  const out = await run(host, ['git', '-C', store, 'log', ...range, '--format=%H%x09%ct%x09%s', '-n', String(LOG_WINDOW)])
   return out ? parseLog(out) : { order: [], entries: [] }
+}
+
+/**
+ * When `base` last took a merge of `branch`, as an ISO time, else null. A
+ * memoir merge commit has one parent, so `base..HEAD` keeps listing the
+ * merged commits; after that time only the branch's later commits count.
+ */
+export async function mergedAt(host: Host, store: string, base: string, branch: string): Promise<string | null> {
+  const out = await run(host, [
+    'git', '-C', store, 'log', base, '-n', '1', '--format=%cI', '--fixed-strings',
+    `--grep=Merge branch '${branch}' into ${base}`,
+  ])
+  const at = out?.trim()
+  return at ? at : null
 }
 
 export async function countCommits(host: Host, store: string): Promise<number | null> {
@@ -155,29 +173,19 @@ export async function readTaxonomy(host: Host, store: string): Promise<Record<st
 }
 
 /**
- * Which keys this branch wrote since it left main (`main..HEAD`), and which
- * keys main's own history has ever stored: enough to tell what the branch
- * added or changed, from git metadata alone. Never `memoir get --branch`:
- * the CLI routes that by checking main out and back, and a Stop-hook write
- * in that window lands on main. Null when main cannot be compared.
- *
- * A memoir merge commit on main has one parent, so `main..HEAD` keeps
- * listing the merged commits; after the latest merge of this branch into
- * main only the branch's later writes count.
+ * Which keys this branch wrote since it left main (`main..HEAD`, or after
+ * `since` once main took a merge of the branch), and which keys main's own
+ * history has ever stored: enough to tell what the branch added or changed,
+ * from git metadata alone. Never `memoir get --branch`: the CLI routes that
+ * by checking main out and back, and a Stop-hook write in that window lands
+ * on main. Null when main cannot be compared.
  */
 export async function readBranchDiff(
   host: Host,
   store: string,
   base: string,
+  since: string | null,
 ): Promise<{ written: Set<string>; onBase: Set<string> } | null> {
-  const head = await readHead(host, store)
-  const mergedAt = head.branch
-    ? await run(host, [
-        'git', '-C', store, 'log', base, '-n', '1', '--format=%cI', '--fixed-strings',
-        `--grep=Merge branch '${head.branch}' into ${base}`,
-      ])
-    : null
-  const since = mergedAt?.trim()
   const written = since
     ? await run(host, ['git', '-C', store, 'log', 'HEAD', `--after=${since}`, '--format=%s'])
     : await run(host, ['git', '-C', store, 'log', `${base}..HEAD`, '--format=%s'])

@@ -191,7 +191,7 @@ export function renderPane(view: PaneView): RenderElement {
       const limit = Math.max(1, Math.floor((rows - 3) / 3))
       body =
         shown.length === 0 ? (
-          <Text dimColor>No commits yet.</Text>
+          <Text dimColor>{status.branch && status.branch !== 'main' ? 'Nothing beyond main yet.' : 'No commits yet.'}</Text>
         ) : (
           <Box flexDirection="column">
             {shown.slice(0, limit).map(c => {
@@ -219,7 +219,7 @@ export function renderPane(view: PaneView): RenderElement {
       footer = (
         <Box justifyContent="space-between">
           <Box gap={3}>
-            <Text dimColor>Enter/click a commit for its change</Text>
+            <Text dimColor>{`${status.branch && status.branch !== 'main' ? 'commits not on main · ' : ''}Enter/click a commit for its change`}</Text>
             {metricsButton}
           </Box>
           {refreshButton}
