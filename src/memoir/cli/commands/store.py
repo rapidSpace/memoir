@@ -201,3 +201,57 @@ def refresh(ctx: MemoirContext):
             ctx.success(f"Refreshed: {memory_count} memories in {ns_count} namespaces")
     except Exception as e:
         ctx.error(f"Failed to refresh: {e}", EXIT_ERROR)
+
+
+@click.command()
+@click.option(
+    "--apply", is_flag=True, help="Delete the dead node files (default: report only)"
+)
+@pass_context
+def gc(ctx: MemoirContext, apply: bool):
+    """Report or delete node files no commit refers to any more.
+
+    Every write saves fresh prolly nodes and nothing removes the old ones, so
+    a store accumulates dead node files under .git/prolly/nodes/files. This
+    walks every ref's commits (branches, remotes, tags, backups) from their
+    roots and keeps what they reach. Without --apply nothing is deleted.
+
+    \b
+    Examples:
+      memoir gc            # how many dead nodes, how much space
+      memoir gc --apply    # delete them
+
+    JSON output includes: reachable, orphans, bytes_orphaned, deleted, applied, roots
+    """
+    if not ctx.store_path:
+        ctx.error(
+            "No store configured. Pass -s <path>, set MEMOIR_STORE, or cd into a memoir store.",
+            EXIT_NO_STORE,
+        )
+
+    from memoir.store.node_gc import collect_garbage
+
+    try:
+        result = collect_garbage(ctx.store_path, apply=apply)
+    except Exception as e:
+        ctx.error(f"gc failed: {e}", EXIT_ERROR)
+        return
+
+    if ctx.json_output:
+        ctx.output({"success": True, **result.to_dict()})
+        return
+    size = result.bytes_orphaned / 1_000_000
+    if result.applied:
+        ctx.success(
+            f"deleted {result.deleted:,} dead node files ({size:,.1f} MB); "
+            f"{result.reachable:,} live nodes kept across {result.roots:,} commit roots"
+        )
+    elif result.orphans:
+        ctx.success(
+            f"{result.orphans:,} dead node files ({size:,.1f} MB) behind "
+            f"{result.reachable:,} live nodes; run `memoir gc --apply` to delete them"
+        )
+    else:
+        ctx.success(
+            f"nothing to collect: {result.reachable:,} live nodes, no dead ones"
+        )

@@ -299,7 +299,7 @@ Cloud stores are addressed GitHub-style as `<owner>/<store>`, where `owner` is y
 | `memoir remote add [<owner>/<store>] [--url <gateway>] [--force]` | Link an existing cloud store. With no argument, proposes `<your handle>/<directory name>` and asks first. |
 | `memoir remote add … --name <remote>` / `memoir remote list` | Link another cloud store under its own name (e.g. `staging`); list every remote with its gateway and login state. |
 | `memoir remote show [<remote>]` / `memoir remote remove [<remote>]` | Show the address, gateway, branch and cloud summary; or unlink. Default remote: `origin`. |
-| `memoir push [--branch <b>] [--remote <name>]` | Upload the chunks the cloud is missing, **then** `git push`. Default: current branch. |
+| `memoir push [--branch <b>] [--remote <name>] [--to <cloud branch>] [--force]` | Upload the chunks the cloud is missing, **then** `git push`. Default: current branch. `--to` writes the cloud branch under another name (to park a conflicting branch for a manual merge); `--force` overwrites a cloud branch that is ahead, keeping its previous tip under `refs/memoir/backup/<branch>` first. Only node files some commit reaches are uploaded; dead ones stay home (`memoir gc` removes them). |
 | `memoir fetch [--remote <name>]` | Download new refs and chunks. Moves no local branch. |
 | `memoir pull [<owner>/<store>] [--remote <name>] [--url <gateway>] [--branch <b>] [--force]` | With an address, links the remote first when it's missing (never relinks one that points elsewhere). Then `fetch`, then fast-forward the branch. Creates it from the cloud if missing locally; a never-used local store adopts the cloud history. `--force` replaces the local branch with the cloud copy. |
 | `memoir status` | Adds `origin: <owner>/<store>` when a cloud remote is configured. |
@@ -523,7 +523,7 @@ The rest of the CLI surface is documented inline via `--help`. Command groups at
 
 | Group | Commands | `--help` |
 |---|---|---|
-| Store | `new`, `connect`, `status`, `refresh` | `memoir new --help` |
+| Store | `new`, `connect`, `status`, `refresh`, `gc` — `gc` reports the prolly node files no commit refers to any more (every write leaves the previous nodes behind) and deletes them with `--apply`; it walks every ref's commits, so branches, remotes, tags and backups all keep their nodes | `memoir gc --help` |
 | Memory | `remember`, `recall`, `get`, `forget` | `memoir remember --help` |
 | Branch | `branch`, `checkout`, `merge`, `time-travel`, `diff`, `branch-match` — `diff <a> <b>` lists the memories that differ between two refs (`+` added, `~` modified, `-` removed; `--json` adds `changes` with both values), read from the tree without checking either out | `memoir branch --help` |
 | Crypto | `proof`, `verify`, `blame` | `memoir proof --help` |

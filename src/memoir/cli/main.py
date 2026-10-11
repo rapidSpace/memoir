@@ -458,6 +458,7 @@ from memoir.cli.commands import (  # noqa: E402
 cli.add_command(store.new)
 cli.add_command(store.status)
 cli.add_command(store.refresh)
+cli.add_command(store.gc)
 
 # Taxonomy commands
 cli.add_command(taxonomy.taxonomy)
