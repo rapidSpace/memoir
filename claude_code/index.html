@@ -1373,6 +1373,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Capture feed pane and built-in status line (/memoir:pane)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cloud-push-memoirpush" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cloud push (/memoir:push)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2210,6 +2227,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Capture feed pane and built-in status line (/memoir:pane)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cloud-push-memoirpush" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cloud push (/memoir:push)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2456,6 +2490,10 @@
 <td>Launch or re-open the web UI (readonly, LLM off by default).</td>
 </tr>
 <tr>
+<td><code>/memoir:push [--force]</code></td>
+<td>Push every local memoir branch of this repo to memoir cloud: logs in and links the store when needed, skips branches already merged into <code>main</code>, parks a branch the cloud has moved ahead of under <code>&lt;branch&gt;-conflict-&lt;stamp&gt;</code> (or overwrites it with <code>--force</code>, keeping the cloud's tip under <code>refs/memoir/backup/</code>). See <a href="#cloud-push-memoirpush">Cloud push</a>.</td>
+</tr>
+<tr>
 <td><code>/memoir:pane</code></td>
 <td>Open the memoir pane (Memories, Recent, Metrics tabs). Needs Claude Code 2.1.287+; older versions print a text summary. See <a href="#capture-feed-pane-and-built-in-status-line-memoirpane">Capture feed pane</a>.</td>
 </tr>
@@ -2569,6 +2607,10 @@
 <td>Maps the current cwd to <code>~/.memoir/&lt;slug&gt;</code> (linked worktrees collapse onto the main worktree's slug). Respects <code>$MEMOIR_STORE</code>.</td>
 </tr>
 <tr>
+<td><code>push-cmd.sh</code></td>
+<td>Backing script for <code>/memoir:push</code>: <code>plan</code> / <code>login-start</code> / <code>login-wait</code> / <code>login-key</code> / <code>link</code> / <code>push</code> / <code>push-conflict</code> / <code>push-force</code> / <code>conflict-name</code>, each one line of JSON.</td>
+</tr>
+<tr>
 <td><code>sync-cmd.sh</code></td>
 <td>Backing script for <code>/memoir:sync</code> and the session-start offer: <code>list</code> / <code>dry-run</code> / <code>merge</code> / <code>ignore</code> / <code>snooze</code> / <code>decline</code> / <code>prune</code> (branch deletion; refuses <code>main</code> and the current branch).</td>
 </tr>
@@ -2618,6 +2660,16 @@
 </table>
 <p>The header carries the memoir mark in box drawing, the title, the tabs, and the status. The status (<code>&lt;branch&gt; · N memories · N commits</code>) is three shortcuts: the branch opens Metrics, the memory count Memories, the commit count Recent. On a branch the commit count is what sits on top of main, written <code>+N changes</code> (after a merge of the branch into main, only commits dated after it); on main it is every commit. While the Recent tab hides <code>metrics.*</code> writes (its default) the count leaves them out too, so it matches the rows; <code>m</code> on that tab shows and counts them. The pane docks beside the transcript in a wide fullscreen terminal and seats inline above the prompt otherwise; <code>ctrl+x tab</code> focuses it, <code>ctrl+x x</code> closes it. Where nothing can draw a pane (<code>claude -p</code>, the Agent SDK) the command answers with a plain-text summary.</p>
 <p><strong>How it watches the store.</strong> A 3 s timer stats <code>&lt;store&gt;/.git/HEAD</code> and the current branch's ref — no subprocess. Only when either moved does it run <code>git log --format=%H%x09%ct%x09%s</code> (the latest 10 on main, up to 20 of <code>main..HEAD</code> on a branch), parse the <code>Store &lt;key&gt; in &lt;namespace&gt;</code> subjects, read the memory count the shell hooks cache in <code>plugin-statusline-cache</code>, and fetch the new keys' contents in one batched <code>memoir --json get</code> through <code>scripts/memoir-cli.sh</code> (the same resolver chain as the hooks — never bare <code>memoir</code>, since hook environments lack the venv <code>PATH</code>). Every default-namespace key the <code>summarize</code> call lists is then read in one more batched <code>get</code> (the Memories tab's values, and among them the <code>metrics.turn.*</code> accumulators for the Metrics tab, which change every turn); off <code>main</code> one <code>memoir --json diff main HEAD</code> lists every key that differs with both values (read from the tree, so the store's checked-out branch never moves — <code>get --branch</code> would check main out and back, and a concurrent Stop-hook write would land on main); with a memoir that predates key-level <code>diff</code> output, two <code>git log</code> subject listings tell which keys the branch wrote and which main ever stored instead (after a merge of the branch into main, whose merge commit has one parent, only the branch's writes dated after it count). <code>turn.start</code> records the head commit as the baseline; everything committed after it is "this turn". This catches every write path: the Stop hook, <code>/memoir:remember</code>, the CLI, <code>memoir pull</code>. The pane itself writes only what the Memories tab asks for, through the same CLI: the detail's confirmed action (<code>memoir forget --force</code>, or <code>memoir remember -p &lt;key&gt; --replace</code> with main's value) and <code>p</code>'s merge (<code>memoir merge &lt;branch&gt; --into main -S ours|theirs</code>, for <code>both</code> followed by one <code>remember --merge-policy append</code> per both-sides key, then <code>memoir checkout &lt;branch&gt;</code>; polling pauses meanwhile), then re-reads. Drawn state lives in <code>$.state</code>, so it survives a hot reload and a <code>/clear</code> only resets the turn baseline.</p>
+<h3 id="cloud-push-memoirpush">Cloud push (<code>/memoir:push</code>)<a class="headerlink" href="#cloud-push-memoirpush" title="Permanent link">&para;</a></h3>
+<p><code>/memoir:push [--force]</code> sends this repo's memoir store to <a href="../cloud/">memoir cloud</a> in one go. The agent drives <code>scripts/push-cmd.sh</code>, which prints one line of JSON per step; the agent never composes cloud plumbing itself.</p>
+<ol>
+<li><strong>Plan.</strong> The store, the gateway (<code>MEMOIR_CLOUD_URL</code>, else the linked remote's, else the saved default login), the login state, the <code>origin</code> link, and the branches to push: <code>main</code> first, then the rest by last commit, newest first. Branches already merged into <code>main</code> (an ancestor of it, or carrying a <code>/memoir:sync</code> marker newer than their tip) and the cloud-owned <code>cloud/*</code> branches are left out and listed as skipped.</li>
+<li><strong>Login.</strong> No saved login for the gateway: a browser approval is started (<code>memoir login --no-browser</code>), the link and code are shown, and the command waits up to four minutes for the click. If that cannot work (headless), it offers to take an API key and saves it with <code>memoir login --with-key</code>. The key is never echoed.</li>
+<li><strong>Link.</strong> No <code>origin</code>: <code>memoir remote add &lt;handle&gt;/&lt;repo name&gt;</code> when that cloud store exists, else <code>memoir push --create</code>, which creates and links it. A remote that points elsewhere is reported, never relinked.</li>
+<li><strong>Push.</strong> <code>memoir push --branch &lt;b&gt;</code> per branch. The first push uploads every chunk the cloud lacks; the rest are git pushes.</li>
+<li><strong>Conflicts.</strong> The CLI exits 6 when the cloud branch has commits this machine lacks. Without <code>--force</code> the branch is pushed again as <code>&lt;branch&gt;-conflict-&lt;YYYYMMDD-HHMM&gt;</code> (<code>memoir push --to</code>), to pull and merge by hand on the other side. With <code>--force</code>, only such branches are overwritten (<code>memoir push --force</code>), and the cloud's previous tip is kept locally under <code>refs/memoir/backup/&lt;branch&gt;</code> first.</li>
+<li><strong>Summary.</strong> <code>[mode=pushed|partial|error]</code>, one line per branch, and the counts.</li>
+</ol>
 <p><strong>Why the command is still <code>/memoir:pane</code>.</strong> Mods register commands without a plugin prefix, so the slash command is the thin <code>commands/pane.md</code>, and the mod answers its <code>command.run</code> before the prompt runs. On a Claude Code that cannot load mods the markdown runs instead and prints <code>scripts/pane-cmd.sh</code>'s text summary — the one visible difference on old versions.</p>
 <p><strong>Tests.</strong></p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>claude<span class="w"> </span>plugin<span class="w"> </span>validate<span class="w"> </span>plugins/claude-code<span class="w">   </span><span class="c1"># lists the hooks, $ calls and state keys the module uses</span>

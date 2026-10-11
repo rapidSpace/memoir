@@ -2269,8 +2269,8 @@
 <td>Print the address, gateway, branch and cloud summary; or unlink.</td>
 </tr>
 <tr>
-<td><code>memoir push [--branch &lt;b&gt;] [--create &lt;store&gt;]</code></td>
-<td>Upload every chunk the cloud is missing (batched), <strong>then</strong> <code>git push</code>. <code>--create &lt;store&gt;</code> first creates that cloud store under your handle and links it under <code>--remote</code> (default <code>origin</code>). Default branch: current. Prints <code>pushed main to &lt;owner&gt;/&lt;store&gt;: 7,361 chunks (6,900 new, 41.3 MB sent (gzip)) in 41.2 s, git in 2.4 s</code>.</td>
+<td><code>memoir push [--branch &lt;b&gt;] [--create &lt;store&gt;] [--to &lt;cloud branch&gt;] [--force]</code></td>
+<td>Upload every chunk the cloud is missing (batched; only the node files some commit reaches, never the dead ones <code>memoir gc</code> removes), <strong>then</strong> <code>git push</code>. <code>--create &lt;store&gt;</code> first creates that cloud store under your handle and links it under <code>--remote</code> (default <code>origin</code>). Default branch: current. Prints <code>pushed main to &lt;owner&gt;/&lt;store&gt;: 7,361 chunks (6,900 new, 41.3 MB sent (gzip)) in 41.2 s, git in 2.4 s</code>.</td>
 </tr>
 <tr>
 <td><code>memoir fetch</code></td>

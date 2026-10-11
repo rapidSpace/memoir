@@ -2763,8 +2763,8 @@ to v0.1.7 you had to add the <code>[litellm]</code> extra explicitly.)</p>
 <td>Show the address, gateway, branch and cloud summary; or unlink. Default remote: <code>origin</code>.</td>
 </tr>
 <tr>
-<td><code>memoir push [--branch &lt;b&gt;] [--remote &lt;name&gt;]</code></td>
-<td>Upload the chunks the cloud is missing, <strong>then</strong> <code>git push</code>. Default: current branch.</td>
+<td><code>memoir push [--branch &lt;b&gt;] [--remote &lt;name&gt;] [--to &lt;cloud branch&gt;] [--force]</code></td>
+<td>Upload the chunks the cloud is missing, <strong>then</strong> <code>git push</code>. Default: current branch. <code>--to</code> writes the cloud branch under another name (to park a conflicting branch for a manual merge); <code>--force</code> overwrites a cloud branch that is ahead, keeping its previous tip under <code>refs/memoir/backup/&lt;branch&gt;</code> first. Only node files some commit reaches are uploaded; dead ones stay home (<code>memoir gc</code> removes them).</td>
 </tr>
 <tr>
 <td><code>memoir fetch [--remote &lt;name&gt;]</code></td>
@@ -2985,8 +2985,8 @@ to v0.1.7 you had to add the <code>[litellm]</code> extra explicitly.)</p>
 <tbody>
 <tr>
 <td>Store</td>
-<td><code>new</code>, <code>connect</code>, <code>status</code>, <code>refresh</code></td>
-<td><code>memoir new --help</code></td>
+<td><code>new</code>, <code>connect</code>, <code>status</code>, <code>refresh</code>, <code>gc</code> — <code>gc</code> reports the prolly node files no commit refers to any more (every write leaves the previous nodes behind) and deletes them with <code>--apply</code>; it walks every ref's commits, so branches, remotes, tags and backups all keep their nodes</td>
+<td><code>memoir gc --help</code></td>
 </tr>
 <tr>
 <td>Memory</td>
