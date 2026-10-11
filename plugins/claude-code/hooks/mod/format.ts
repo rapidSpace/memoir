@@ -357,6 +357,9 @@ export function wrapText(text: string, width: number, max: number): string[] {
 
 export const MARKS: Record<MemoirMemory['status'], string> = { added: '+', changed: '~', removed: '-', same: ' ' }
 
+/** The memoir mark in three rows of box drawing: the logo's arch over its two loops. */
+export const LOGO: readonly string[] = [' ╭─────╮ ', '╭╯╭╮ ╭╮╰╮', '╰─╯╰─╯╰─╯']
+
 export type MemoryAction = { verb: string; kind: MemoirMemoryAction; hotkey: string }
 
 /**

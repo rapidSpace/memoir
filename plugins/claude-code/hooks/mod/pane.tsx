@@ -89,8 +89,16 @@ export function renderPane(view: PaneView): RenderElement {
   const width = Math.max(20, view.width)
   const open = new Set(view.expanded)
 
+  // The mark on the left; title, tabs and status stacked beside it.
   const header = (
-    <Box justifyContent="space-between" gap={2}>
+    <Box gap={2}>
+      <Box flexDirection="column">
+        {fmt.LOGO.map(line => (
+          <Text color="claude">{line}</Text>
+        ))}
+      </Box>
+      <Box flexDirection="column">
+      <Text bold>memoir</Text>
       <Box gap={2}>
         <Button key="tab-memories" plain hotkey="1" dimColor={view.tab === 'recent' || view.tab === 'metrics'} onPress={() => void actions.pickTab('memories')}>
           Memories
@@ -131,6 +139,7 @@ export function renderPane(view: PaneView): RenderElement {
         ) : (
           []
         )}
+      </Box>
       </Box>
     </Box>
   )
