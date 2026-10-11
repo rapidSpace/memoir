@@ -482,7 +482,7 @@ export function renderPane(view: PaneView): RenderElement {
             </Button>
             {base !== null && differing.length > 0 ? (
               <Button key="merge" plain dimColor onPress={() => void actions.openMerge()}>
-                {`merge to ${base}`}
+                {`merge to ${base} memory`}
               </Button>
             ) : (
               []

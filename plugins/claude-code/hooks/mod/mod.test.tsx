@@ -526,7 +526,7 @@ test('memories tab (the default): on a branch only the keys that differ from mai
   expect(await ui.find({ type: 'Button', key: 'mem-workflow.coding.gates' })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'mem-metrics.turn.feat/x' })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'all', text: 'all branches (off)' })).toBeDefined()
-  expect(await ui.find({ type: 'Button', key: 'merge', text: 'merge to main' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'merge', text: 'merge to main memory' })).toBeDefined()
   // Main is read through the CLI's key-level diff: never `get --branch` (the CLI would check main out).
   expect(w.runs.some(argv => argv.includes('diff') && argv.includes('main') && argv.includes('HEAD'))).toBe(true)
   expect(w.runs.some(argv => argv.includes('--branch'))).toBe(false)
