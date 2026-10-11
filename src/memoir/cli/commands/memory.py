@@ -203,10 +203,11 @@ def _render_remember_result(ctx, result) -> None:
     envvar="MEMOIR_BRANCH",
     default=None,
     help=(
-        "Route this write to a specific branch without changing the store's "
-        "checked-out branch (per-call routing for multi-agent setups; env: "
-        "MEMOIR_BRANCH). If the branch doesn't exist it's auto-created off "
-        "current HEAD."
+        "Write to a specific branch (per-call routing for multi-agent setups; "
+        "env: MEMOIR_BRANCH). The branch is checked out for the duration of "
+        "the write under the store's write lock and the previous branch is "
+        "restored after; other writers wait meanwhile. If the branch doesn't "
+        "exist it's auto-created off current HEAD."
     ),
 )
 @pass_context
@@ -375,9 +376,9 @@ def remember(
     envvar="MEMOIR_BRANCH",
     default=None,
     help=(
-        "Recall from a specific branch without changing the store's checked-out "
-        "branch (per-call routing for multi-agent setups; env: MEMOIR_BRANCH). "
-        "Errors if the branch doesn't exist."
+        "Recall from a specific branch, read as a snapshot without a checkout "
+        "(per-call routing for multi-agent setups; env: MEMOIR_BRANCH). Errors "
+        "if the branch doesn't exist."
     ),
 )
 @pass_context
@@ -416,17 +417,16 @@ def recall(
             EXIT_NO_STORE,
         )
 
-    from memoir.services.branch_service import BranchService
     from memoir.services.memory_service import MemoryService
 
-    service = MemoryService(ctx.store_path, llm_model=model)
-    branch_service = BranchService(ctx.store_path)
+    # A routed read opens the branch as a snapshot: no checkout, nothing for
+    # another process to trip over.
+    service = MemoryService(ctx.store_path, llm_model=model, ref=branch)
 
     try:
-        with branch_service.routed_to(branch, auto_create=False):
-            result = asyncio.run(
-                service.recall(query, limit=limit, namespace=namespace, mode=mode)
-            )
+        result = asyncio.run(
+            service.recall(query, limit=limit, namespace=namespace, mode=mode)
+        )
 
         if ctx.json_output:
             ctx.output(result.to_dict())
@@ -474,9 +474,9 @@ def recall(
     envvar="MEMOIR_BRANCH",
     default=None,
     help=(
-        "Read from a specific branch without changing the store's checked-out "
-        "branch (per-call routing for multi-agent setups; env: MEMOIR_BRANCH). "
-        "Errors if the branch doesn't exist."
+        "Read from a specific branch, as a snapshot without a checkout "
+        "(per-call routing for multi-agent setups; env: MEMOIR_BRANCH). Errors "
+        "if the branch doesn't exist."
     ),
 )
 @pass_context
@@ -507,15 +507,12 @@ def get_memory(ctx: MemoirContext, keys: tuple, namespace: str, branch: str | No
             EXIT_NO_STORE,
         )
 
-    from memoir.services.branch_service import BranchService
     from memoir.services.memory_service import MemoryService
 
-    service = MemoryService(ctx.store_path)
-    branch_service = BranchService(ctx.store_path)
+    service = MemoryService(ctx.store_path, ref=branch)
 
     try:
-        with branch_service.routed_to(branch, auto_create=False):
-            result = service.get(list(keys), namespace)
+        result = service.get(list(keys), namespace)
 
         if ctx.json_output:
             ctx.output(result.to_dict())
@@ -566,9 +563,10 @@ def get_memory(ctx: MemoirContext, keys: tuple, namespace: str, branch: str | No
     envvar="MEMOIR_BRANCH",
     default=None,
     help=(
-        "Delete from a specific branch without changing the store's checked-out "
-        "branch (per-call routing for multi-agent setups; env: MEMOIR_BRANCH). "
-        "Errors if the branch doesn't exist."
+        "Delete from a specific branch (per-call routing for multi-agent "
+        "setups; env: MEMOIR_BRANCH). The branch is checked out for the "
+        "duration under the store's write lock, then the previous branch is "
+        "restored. Errors if the branch doesn't exist."
     ),
 )
 @pass_context

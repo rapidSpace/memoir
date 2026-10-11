@@ -27,6 +27,7 @@ from memoir.services.models import (
     CommitInfo,
     MergeResult,
 )
+from memoir.store.write_lock import store_write_lock
 
 
 class MergeStrategy(str, Enum):
@@ -244,11 +245,16 @@ class BranchService(BaseService):
 
     @contextlib.contextmanager
     def routed_to(self, branch: str | None, *, auto_create: bool) -> Iterator[None]:
-        """Temporarily route store operations to ``branch``, then restore HEAD.
+        """Route a **write** to ``branch``: check it out, run the block, restore HEAD.
 
-        Used by per-call --branch / MEMOIR_BRANCH routing (issue #123) so a
-        single command can target an agent's branch without flipping the
-        repo's checkout state for everything else in the process.
+        Used by per-call --branch / MEMOIR_BRANCH routing on write commands
+        (issue #123). The checkout is real, on-disk state for the duration of
+        the block: anything reading ``.git/HEAD`` meanwhile sees ``branch``.
+        The whole block holds the store's write lock, so another writer (a
+        plugin hook's ``memoir remember``, say) waits for the restore instead
+        of committing onto the routed branch (issue #179). Reads never come
+        here: they open the branch as a snapshot (``ProllyTreeStore(ref=)``)
+        and touch nothing.
 
         Args:
             branch: Target branch. ``None`` makes this a no-op so callers can
@@ -268,6 +274,10 @@ class BranchService(BaseService):
             yield
             return
 
+        with store_write_lock(self.store_path):
+            yield from self._routed_to_locked(branch, auto_create=auto_create)
+
+    def _routed_to_locked(self, branch: str, *, auto_create: bool) -> Iterator[None]:
         store = self._get_store()
 
         # Capture HEAD up front. We must know what to restore to — if we

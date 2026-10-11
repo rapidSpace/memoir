@@ -19,14 +19,18 @@ logger = logging.getLogger(__name__)
 class BaseService:
     """Base class for all memoir services."""
 
-    def __init__(self, store_path: str):
+    def __init__(self, store_path: str, ref: str | None = None):
         """
         Initialize service with store path.
 
         Args:
             store_path: Path to the memory store directory
+            ref: Read the store as it is at this branch instead of the
+                checked-out one, without a checkout (the store is then
+                read-only). This is how ``--branch`` routes reads.
         """
         self.store_path = str(Path(store_path).expanduser().resolve())
+        self.ref = ref
         self._store = None
 
     def _get_store(self):
@@ -44,6 +48,7 @@ class BaseService:
                 enable_versioning=True,
                 auto_commit=True,
                 cache_size=10000,
+                ref=self.ref,
             )
         return self._store
 

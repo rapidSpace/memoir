@@ -41,7 +41,11 @@ Flags accepted before the subcommand, on the `memoir` group itself:
 
 ### Per-call branch routing (multi-agent)
 
-`remember`, `recall`, `get`, `forget`, and `search` accept `--branch <name>` (env: `MEMOIR_BRANCH`). When set, the call operates against that branch and the store's checked-out branch is restored on exit — no `memoir checkout` round-trip, no race window on shared deployments.
+`remember`, `recall`, `get`, `forget`, and `search` accept `--branch <name>` (env: `MEMOIR_BRANCH`). When set, the call operates against that branch instead of the store's checked-out one.
+
+**Reads (`recall`, `get`, `search`) never touch the checkout.** The branch is opened as a snapshot straight from its committed root, so `.git/HEAD` and every other process sharing the store are unaffected, and the view is read-only.
+
+**Writes (`remember`, `forget`, `capture`) check the branch out for the duration of the write, under the store's write lock.** The previous branch is restored on exit. Every memoir writer takes the same lock (`<store>/.git/memoir-write.lock`), so a concurrent `remember` from another process, such as the Claude Code plugin's Stop hook, waits for the restore instead of committing onto the routed branch. Anything that only *reads* `.git/HEAD` meanwhile, like a status line, sees the routed branch for that moment.
 
 **Set `MEMOIR_BRANCH` once at the runtime boundary** (LangGraph node, MCP client, agent shell). Each agent process injects its own identity once instead of threading a flag through every call site:
 
@@ -92,9 +96,9 @@ memoir merge agents/reviewer --into main
 memoir recall "N+1"   # now visible on main
 ```
 
-After every `--branch` call the store's checked-out branch is unchanged — routing is per-call, not a checkout.
+After every `--branch` call the store's checked-out branch is unchanged.
 
-**Concurrency note.** Routing is per-process. Don't run multiple in-process writers concurrently against the same store on different branches. Separate CLI invocations are fine — they rely on the same prollytree file locking as today.
+**Concurrency note.** Writers serialize on the store's write lock, across processes and threads; a writer that cannot get it within two minutes fails with "Another memoir process has been writing…" rather than waiting forever. Reads are lock-free.
 
 ## Search commands
 

@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from memoir.store.backend import is_memoir_store, resolve_backend, write_backend_lock
 from memoir.store.cwd_locked import CwdLockedTree
 from memoir.store.git_safety import harden_git_config
+from memoir.store.write_lock import store_write_lock
 
 # Storage layer doesn't import classification or search modules
 # These are handled by higher layers
@@ -111,6 +112,7 @@ class ProllyTreeStore(BaseStore):
         enable_versioning: bool = True,
         auto_commit: bool = True,
         cache_size: int = 10000,
+        ref: str | None = None,
     ):
         """
         Initialize ProllyTree store.
@@ -130,8 +132,14 @@ class ProllyTreeStore(BaseStore):
             enable_versioning: Whether to enable git-like versioning
             auto_commit: Whether to automatically commit on each put/delete operation
             cache_size: Size of internal caches
+            ref: Read the store as it is at this branch (or commit) instead
+                of the checked-out one. The tree is loaded from the ref's
+                committed root without a checkout, so the store's HEAD and
+                every other process are untouched; the store is then
+                read-only (``put``/``delete``/``commit`` raise).
         """
         super().__init__()
+        self.ref = ref
 
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
@@ -248,6 +256,12 @@ class ProllyTreeStore(BaseStore):
         # Performance tracking
         self._stats = {"reads": 0, "writes": 0, "searches": 0, "classifications": 0}
 
+        if ref is not None:
+            if not enable_versioning:
+                raise ValueError("ref= needs a versioned store")
+            self.tree = _SnapshotTree(self.tree, ref)
+            self.auto_commit = False
+
         # Key registry for memory mode (since ProllyTree doesn't have list_keys in memory mode)
         self._keys = set()
 
@@ -363,36 +377,88 @@ class ProllyTreeStore(BaseStore):
 
     def put(self, namespace: tuple, key: str, value: dict) -> None:
         """Store a value in a namespace."""
+        self._refuse_write("put")
         self._stats["writes"] += 1
         full_key = ":".join(namespace) + ":" + key
         key_bytes = full_key.encode("utf-8")
         value_bytes = self._encode_value(value)
 
         try:
-            if self.enable_versioning:
-                # VersionedKvStore API - check if key exists using get
-                existing = self.tree.get(key_bytes)
-                if existing:
-                    self.tree.update(key_bytes, value_bytes)
-                else:
-                    self.tree.insert(key_bytes, value_bytes)
-                # Commit the change if auto_commit is enabled
-                if self.auto_commit:
-                    self.tree.commit(f"Store {key} in {':'.join(namespace)}")
-            else:
-                # ProllyTree API - check if key exists using find
-                existing = self.tree.find(key_bytes)
-                if existing:
-                    self.tree.update(key_bytes, value_bytes)
-                else:
-                    self.tree.insert(key_bytes, value_bytes)
-
+            with self._write_lock():
+                self._follow_head()
+                self._put_locked(namespace, key, key_bytes, value_bytes)
             # Track the key in our registry
             self._keys.add(full_key)
-
         except Exception as e:
             logger.error(f"Error storing {full_key}: {e}")
             raise
+
+    def _put_locked(
+        self, namespace: tuple, key: str, key_bytes: bytes, value_bytes: bytes
+    ) -> None:
+        if self.enable_versioning:
+            # VersionedKvStore API - check if key exists using get
+            existing = self.tree.get(key_bytes)
+            if existing:
+                self.tree.update(key_bytes, value_bytes)
+            else:
+                self.tree.insert(key_bytes, value_bytes)
+            # Commit the change if auto_commit is enabled
+            if self.auto_commit:
+                self.tree.commit(f"Store {key} in {':'.join(namespace)}")
+        else:
+            # ProllyTree API - check if key exists using find
+            existing = self.tree.find(key_bytes)
+            if existing:
+                self.tree.update(key_bytes, value_bytes)
+            else:
+                self.tree.insert(key_bytes, value_bytes)
+
+    def _refuse_write(self, what: str) -> None:
+        if self.ref is not None:
+            raise ReadOnlyStoreError(
+                f"Cannot {what}: this store is a read-only view of '{self.ref}'. "
+                f"Check the branch out, or route the write with --branch."
+            )
+
+    def _write_lock(self):
+        """The store-wide write lock, a no-op for memory mode."""
+        if not self.enable_versioning:
+            return contextlib.nullcontext()
+        return store_write_lock(self.path)
+
+    def _follow_head(self) -> None:
+        """Commit onto the branch the store has checked out *now*.
+
+        The tree remembers the branch it was opened on. A process that opened
+        the store while another had a branch routed (``--branch`` checks it
+        out for a write), or that stays open across someone else's checkout,
+        would otherwise commit onto that stale branch once it gets the lock.
+        Called with the write lock held.
+        """
+        if not self.enable_versioning:
+            return
+        try:
+            head = (self.path / ".git" / "HEAD").read_text(encoding="utf-8").strip()
+        except OSError:
+            return
+        prefix = "ref: refs/heads/"
+        if not head.startswith(prefix):
+            return
+        on_disk = head[len(prefix) :]
+        current = self.tree.current_branch()
+        if isinstance(current, bytes):
+            current = current.decode("utf-8")
+        if current == on_disk:
+            return
+        logger.info(
+            "store checked out '%s' since this instance loaded '%s': following it",
+            on_disk,
+            current,
+        )
+        self.tree.checkout(on_disk)
+        self._keys = set()
+        self._populate_key_registry()
 
     def get(self, namespace: tuple, key: str) -> dict | None:
         """Retrieve a value from a namespace."""
@@ -414,15 +480,18 @@ class ProllyTreeStore(BaseStore):
 
     def delete(self, namespace: tuple, key: str) -> None:
         """Delete a key from a namespace."""
+        self._refuse_write("delete")
         full_key = ":".join(namespace) + ":" + key
         key_bytes = full_key.encode("utf-8")
 
         try:
-            self.tree.delete(key_bytes)
-            # Remove from key registry
-            self._keys.discard(full_key)
-            if self.enable_versioning and self.auto_commit:
-                self.tree.commit(f"Delete {key} from {':'.join(namespace)}")
+            with self._write_lock():
+                self._follow_head()
+                self.tree.delete(key_bytes)
+                # Remove from key registry
+                self._keys.discard(full_key)
+                if self.enable_versioning and self.auto_commit:
+                    self.tree.commit(f"Delete {key} from {':'.join(namespace)}")
         except Exception as e:
             logger.error(f"Error deleting {full_key}: {e}")
 
@@ -442,9 +511,12 @@ class ProllyTreeStore(BaseStore):
         if not self.enable_versioning:
             logger.warning("Commit requested but versioning is not enabled")
             return None
+        self._refuse_write("commit")
 
         try:
-            commit_hash = self.tree.commit(message)
+            with self._write_lock():
+                self._follow_head()
+                commit_hash = self.tree.commit(message)
             logger.debug(f"Manual commit successful: {message}")
             return commit_hash
         except Exception as e:
@@ -843,3 +915,47 @@ class ProllyTreeStore(BaseStore):
             )
 
         logger.info(f"Exported {len(memories)} memories to {output_path}")
+
+
+class ReadOnlyStoreError(RuntimeError):
+    """A write was attempted on a store opened as a read-only view of a ref."""
+
+
+class _SnapshotTree:
+    """The key-value state of one ref, read once; the ``VersionedKvStore``
+    surface the adapter's read paths use, with every write refused.
+
+    Built from ``get_keys_at_ref``, which loads the ref's committed root
+    straight from the node store: no checkout, so the store's HEAD and the
+    other processes sharing the store never notice (issue #179).
+    """
+
+    def __init__(self, tree: Any, ref: str):
+        self._ref = ref
+        try:
+            pairs = tree.get_keys_at_ref(ref)
+        except Exception as e:
+            raise ValueError(
+                f"Branch '{ref}' does not exist. Create it explicitly with "
+                f"`memoir branch {ref}`, or use a write command "
+                f"(e.g. `memoir remember --branch={ref} ...`) to bootstrap it."
+            ) from e
+        self._data: dict[bytes, bytes] = {}
+        for key, value in pairs:
+            self._data[bytes(key)] = bytes(value)
+
+    def get(self, key: bytes) -> bytes | None:
+        return self._data.get(bytes(key))
+
+    find = get
+
+    def list_keys(self) -> list[bytes]:
+        return list(self._data.keys())
+
+    def current_branch(self) -> str:
+        return self._ref
+
+    def __getattr__(self, name: str) -> Any:
+        raise ReadOnlyStoreError(
+            f"Cannot {name}: this store is a read-only view of '{self._ref}'."
+        )

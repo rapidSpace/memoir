@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 class SearchService(BaseService):
-    def __init__(self, store_path: str):
-        super().__init__(store_path)
+    def __init__(self, store_path: str, ref: str | None = None):
+        super().__init__(store_path, ref=ref)
         self._vector_service: VectorService | None = None
 
     def _get_vector_service(self) -> VectorService:

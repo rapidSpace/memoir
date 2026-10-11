@@ -41,9 +41,9 @@ from memoir.cli.main import (
     envvar="MEMOIR_BRANCH",
     default=None,
     help=(
-        "Search a specific branch without changing the store's checked-out "
-        "branch (per-call routing for multi-agent setups; env: MEMOIR_BRANCH). "
-        "Errors if the branch doesn't exist."
+        "Search a specific branch, read as a snapshot without a checkout "
+        "(per-call routing for multi-agent setups; env: MEMOIR_BRANCH). Errors "
+        "if the branch doesn't exist."
     ),
 )
 @pass_context
@@ -69,14 +69,12 @@ def search(
             EXIT_NO_STORE,
         )
 
-    from memoir.services.branch_service import BranchService
     from memoir.services.search_service import SearchService
 
     try:
-        with BranchService(ctx.store_path).routed_to(branch, auto_create=False):
-            result = SearchService(ctx.store_path).search(
-                query, namespace=namespace, k=top_k
-            )
+        result = SearchService(ctx.store_path, ref=branch).search(
+            query, namespace=namespace, k=top_k
+        )
     except Exception as e:
         ctx.error(f"search failed: {e}", EXIT_ERROR)
         return

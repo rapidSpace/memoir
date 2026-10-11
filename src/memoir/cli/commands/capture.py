@@ -187,9 +187,9 @@ def _parse_facts(text: str) -> list[tuple[list[str], str]]:
     envvar="MEMOIR_BRANCH",
     default=None,
     help=(
-        "Route captures to a specific branch without changing the store's "
-        "checked-out branch (env: MEMOIR_BRANCH). Auto-created off HEAD if "
-        "missing."
+        "Write captures to a specific branch (env: MEMOIR_BRANCH): checked "
+        "out for the duration under the store's write lock, previous branch "
+        "restored after. Auto-created off HEAD if missing."
     ),
 )
 @click.option(

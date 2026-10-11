@@ -43,7 +43,9 @@ class MemoryService(BaseService):
     for remember and intelligent search for recall.
     """
 
-    def __init__(self, store_path: str, llm_model: str | None = None):
+    def __init__(
+        self, store_path: str, llm_model: str | None = None, ref: str | None = None
+    ):
         """
         Initialize memory service.
 
@@ -55,8 +57,9 @@ class MemoryService(BaseService):
                 by ``memoir.llm.default_ui_model`` so CLI and UI agree.
                 Set MEMOIR_LLM_MODEL=gpt-4o-mini (with OPENAI_API_KEY) for
                 the previous OpenAI-based behavior.
+            ref: Read from this branch without checking it out (read-only).
         """
-        super().__init__(store_path)
+        super().__init__(store_path, ref=ref)
         if llm_model is None:
             llm_model = os.environ.get("MEMOIR_LLM_MODEL", "claude-haiku-4-5")
         self.llm_model = llm_model
