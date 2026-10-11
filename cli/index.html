@@ -2505,7 +2505,9 @@
 </tbody>
 </table>
 <h3 id="per-call-branch-routing-multi-agent">Per-call branch routing (multi-agent)<a class="headerlink" href="#per-call-branch-routing-multi-agent" title="Permanent link">&para;</a></h3>
-<p><code>remember</code>, <code>recall</code>, <code>get</code>, <code>forget</code>, and <code>search</code> accept <code>--branch &lt;name&gt;</code> (env: <code>MEMOIR_BRANCH</code>). When set, the call operates against that branch and the store's checked-out branch is restored on exit — no <code>memoir checkout</code> round-trip, no race window on shared deployments.</p>
+<p><code>remember</code>, <code>recall</code>, <code>get</code>, <code>forget</code>, and <code>search</code> accept <code>--branch &lt;name&gt;</code> (env: <code>MEMOIR_BRANCH</code>). When set, the call operates against that branch instead of the store's checked-out one.</p>
+<p><strong>Reads (<code>recall</code>, <code>get</code>, <code>search</code>) never touch the checkout.</strong> The branch is opened as a snapshot straight from its committed root, so <code>.git/HEAD</code> and every other process sharing the store are unaffected, and the view is read-only.</p>
+<p><strong>Writes (<code>remember</code>, <code>forget</code>, <code>capture</code>) check the branch out for the duration of the write, under the store's write lock.</strong> The previous branch is restored on exit. Every memoir writer takes the same lock (<code>&lt;store&gt;/.git/memoir-write.lock</code>), so a concurrent <code>remember</code> from another process, such as the Claude Code plugin's Stop hook, waits for the restore instead of committing onto the routed branch. Anything that only <em>reads</em> <code>.git/HEAD</code> meanwhile, like a status line, sees the routed branch for that moment.</p>
 <p><strong>Set <code>MEMOIR_BRANCH</code> once at the runtime boundary</strong> (LangGraph node, MCP client, agent shell). Each agent process injects its own identity once instead of threading a flag through every call site:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1"># In agent A's process</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">MEMOIR_BRANCH</span><span class="o">=</span>agents/reviewer
@@ -2539,8 +2541,8 @@
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>memoir<span class="w"> </span>merge<span class="w"> </span>agents/reviewer<span class="w"> </span>--into<span class="w"> </span>main
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>memoir<span class="w"> </span>recall<span class="w"> </span><span class="s2">"N+1"</span><span class="w">   </span><span class="c1"># now visible on main</span>
 </span></code></pre></div>
-<p>After every <code>--branch</code> call the store's checked-out branch is unchanged — routing is per-call, not a checkout.</p>
-<p><strong>Concurrency note.</strong> Routing is per-process. Don't run multiple in-process writers concurrently against the same store on different branches. Separate CLI invocations are fine — they rely on the same prollytree file locking as today.</p>
+<p>After every <code>--branch</code> call the store's checked-out branch is unchanged.</p>
+<p><strong>Concurrency note.</strong> Writers serialize on the store's write lock, across processes and threads; a writer that cannot get it within two minutes fails with "Another memoir process has been writing…" rather than waiting forever. Reads are lock-free.</p>
 <h2 id="search-commands">Search commands<a class="headerlink" href="#search-commands" title="Permanent link">&para;</a></h2>
 <p>The three pipelines described in <a href="../theory/search/">Search Theory</a> are all reachable here. Pick the one that matches how narrow or open-ended your query is.</p>
 <h3 id="memoir-recall-semantic-search-in-engine"><code>memoir recall</code> — semantic search (in-engine)<a class="headerlink" href="#memoir-recall-semantic-search-in-engine" title="Permanent link">&para;</a></h3>
