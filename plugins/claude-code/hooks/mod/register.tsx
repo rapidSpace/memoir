@@ -14,6 +14,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type {
+  MemoirBranchDiff,
   MemoirCapture,
   MemoirCommitDetail,
   MemoirMemories,
@@ -32,6 +33,8 @@ import * as store from './store'
 const PANE_ID = 'memoir'
 const COMMAND = 'memoir:pane'
 const POLL_MS = 3000
+// The all-branches view lists this many branches, the most recently changed first.
+const BRANCH_LIMIT = 10
 
 // The drawn state, in `$.state` so a write redraws its readers and a hot reload
 // keeps it. The engine reads these references off this file, so they live here.
@@ -49,6 +52,9 @@ const metrics = atom({ plugin: 'memoir', key: 'metrics' } as const, {} as Record
 const memoryList = atom({ plugin: 'memoir', key: 'memories' } as const, { items: [], base: null } as MemoirMemories)
 const filter = atom({ plugin: 'memoir', key: 'filter' } as const, '')
 const selected = atom({ plugin: 'memoir', key: 'selected' } as const, null as string | null)
+const selectedBranch = atom({ plugin: 'memoir', key: 'selectedBranch' } as const, null as string | null)
+const allBranches = atom({ plugin: 'memoir', key: 'allBranches' } as const, false)
+const branchList = atom({ plugin: 'memoir', key: 'branches' } as const, [] as MemoirBranchDiff[])
 const armed = atom({ plugin: 'memoir', key: 'armed' } as const, null as MemoirMemoryAction | null)
 const merge = atom({ plugin: 'memoir', key: 'merge' } as const, 'idle' as MemoirMergeState)
 const commit = atom({ plugin: 'memoir', key: 'commit' } as const, null as string | null)
@@ -92,6 +98,8 @@ export const register: Register = on => {
 
     let fingerprint = ''
     let inFlight: Promise<void> | null = null
+    // Other branches' differences from main, kept until the branch or main moves.
+    const branchCache = new Map<string, { tips: string; diff: MemoirBranchDiff }>()
     // While a merge checks main out and back, a poll would draw the wrong branch.
     let merging = false
     const contents = new Map<string, string | null>() // sha → stored text
@@ -102,7 +110,11 @@ export const register: Register = on => {
         return
       }
       const path = storePath
-      const fp = await store.fingerprint(host, path)
+      const everyBranch = await read($, allBranches)
+      let fp = await store.fingerprint(host, path)
+      // With every branch on view, any branch moving must redraw it too.
+      const heads = everyBranch ? await store.listBranches(host, path) : []
+      if (everyBranch) fp += '|' + heads.map(h => `${h.branch}@${h.tip}`).join(',')
       if (!force && fp === fingerprint) return
       fingerprint = fp
 
@@ -172,6 +184,30 @@ export const register: Register = on => {
       await update($, taxonomy, () => tree)
       await update($, metrics, () => turnMetrics)
       await update($, memoryList, () => compared)
+
+      if (everyBranch) {
+        const mainTip = heads.find(h => h.branch === 'main')?.tip ?? ''
+        const diffs: MemoirBranchDiff[] = []
+        for (const h of heads.filter(h => h.branch !== 'main').slice(0, BRANCH_LIMIT)) {
+          const tips = `${h.tip}:${mainTip}`
+          const cached = branchCache.get(h.branch)
+          if (cached && cached.tips === tips) {
+            diffs.push(cached.diff)
+            continue
+          }
+          const exact = await store.readKeyChanges(host, path, 'main', h.branch)
+          let diff: MemoirBranchDiff
+          if (exact) diff = { branch: h.branch, at: h.at, items: fmt.itemsFromChanges(exact.values()), exact: true }
+          else {
+            const merged = await store.mergedAt(host, path, 'main', h.branch)
+            const written = await store.readBranchDiff(host, path, 'main', merged, h.branch)
+            diff = { branch: h.branch, at: h.at, items: written ? fmt.itemsFromHistory(written) : [], exact: false }
+          }
+          branchCache.set(h.branch, { tips, diff })
+          diffs.push(diff)
+        }
+        await update($, branchList, () => diffs)
+      }
     }
 
     refresh = (force = false) => {
@@ -282,6 +318,9 @@ export const register: Register = on => {
       memories: await read($, memoryList),
       filter: await read($, filter),
       selected: await read($, selected),
+      selectedBranch: await read($, selectedBranch),
+      allBranches: await read($, allBranches),
+      branches: await read($, branchList),
       armed: await read($, armed),
       merge: await read($, merge),
       commit: await read($, commit),
@@ -293,9 +332,14 @@ export const register: Register = on => {
         toggleMetrics: () => update($, showMetrics, v => !v),
         toggleTaxonomy: () => update($, showTaxonomy, v => !v),
         setFilter: text => update($, filter, () => text),
-        select: async key => {
+        select: async (key, branch = null) => {
           await update($, armed, () => null)
+          await update($, selectedBranch, () => (key === null ? null : branch))
           await update($, selected, () => key)
+        },
+        toggleAllBranches: async () => {
+          await update($, allBranches, v => !v)
+          await refresh(true)
         },
         arm: kind => update($, armed, () => kind),
         disarm: () => update($, armed, () => null),

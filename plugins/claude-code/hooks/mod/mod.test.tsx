@@ -65,6 +65,17 @@ const CHANGES_JSON = JSON.stringify({
   ],
 })
 
+/** `memoir diff main feat/old`: an older branch's one difference. */
+const OLD_CHANGES_JSON = JSON.stringify({
+  from: 'main',
+  to: 'feat/old',
+  diff: '',
+  changes: [{ namespace: 'default', key: 'a.b.c', operation: 'added', old: null, new: { content: 'only on the old branch' } }],
+})
+
+/** `git for-each-ref --sort=-committerdate`: main, then the branches, newest commit first. */
+const REFS = ['feat/x\t1700000350\t' + sha(7), 'main\t1700000300\t' + sha(3), 'feat/old\t1699990000\t' + sha(5)].join('\n') + '\n'
+
 /** Subjects of the commits this branch made since leaving main, and of main's own history (the fallback comparison). */
 const BRANCH_SUBJECTS = ['Store knowledge.technical.build in default', 'Store knowledge.decisions.architecture in default', 'Store metrics.turn.main in default'].join('\n') + '\n'
 const MAIN_SUBJECTS = ['Store workflow.coding.gates in default', 'Store knowledge.decisions.architecture in default', 'Store metrics.turn.main in default', 'Initialize memoir store'].join('\n') + '\n'
@@ -150,6 +161,8 @@ function world(on: On, overrides: Partial<World> = {}) {
       stdout = w.store ?? ''
       exitCode = w.store === null ? 1 : 0
     } else if (argv.includes('rev-list')) stdout = argv.includes('--invert-grep') ? w.countNoMetrics : w.count
+    else if (argv.includes('for-each-ref')) stdout = REFS
+    else if (argv.includes(' diff main feat/old')) stdout = w.oldCli ? JSON.stringify({ from: 'main', to: 'feat/old', diff: '' }) : OLD_CHANGES_JSON
     else if (argv.includes('--grep=')) stdout = w.mergedAt
     else if (argv.includes('--after=')) stdout = argv.includes('--format=%s') ? w.afterMerge : w.log
     else if (argv.includes('main..HEAD')) stdout = argv.includes('--format=%s') ? BRANCH_SUBJECTS : w.log
@@ -477,6 +490,17 @@ test('diffMemories: exact from the key-level diff, else from which keys the bran
   expect(fmt.filterMemories([{ key: 'a.Build' }, { key: 'b.x' }], ' build ').map(m => m.key)).toEqual(['a.Build'])
   expect(fmt.filterMemories([{ key: 'a' }], '')).toHaveLength(1)
   expect(fmt.wrapText('one two\n\nthree', 5, 10)).toEqual(['one', 'two', '', 'three'])
+  expect(fmt.itemsFromChanges([
+    { key: 'z', operation: 'removed', old: 'gone', new: null },
+    { key: 'a', operation: 'modified', old: 'before', new: 'after' },
+  ])).toEqual([
+    { key: 'a', content: 'after', base: 'before', status: 'changed' },
+    { key: 'z', content: null, base: 'gone', status: 'removed' },
+  ])
+  expect(fmt.itemsFromHistory({ written: new Set(['b', 'a']), onBase: new Set(['b']) })).toEqual([
+    { key: 'a', content: null, base: null, status: 'added' },
+    { key: 'b', content: null, base: null, status: 'changed' },
+  ])
   const changed = { key: 'k', content: 'new', base: 'old', status: 'changed' as const }
   const verbs = (m: Parameters<typeof fmt.memoryActions>[0], base: string | null) => fmt.memoryActions(m, base).map(a => [a.kind, a.verb])
   expect(verbs(changed, 'main')).toEqual([['forget', 'forget key'], ['restore', "restore main's value"]])
@@ -498,7 +522,7 @@ test('memories tab (the default): on a branch only the keys that differ from mai
   // Unchanged keys stay out of the branch view.
   expect(await ui.find({ type: 'Button', key: 'mem-workflow.coding.gates' })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'mem-metrics.turn.feat/x' })).toBeUndefined()
-  expect(await ui.find({ type: 'Button', key: 'all' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'all', text: 'all branches (off)' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'merge', text: 'merge to main' })).toBeDefined()
   // Main is read through the CLI's key-level diff: never `get --branch` (the CLI would check main out).
   expect(w.runs.some(argv => argv.includes('diff') && argv.includes('main') && argv.includes('HEAD'))).toBe(true)
@@ -738,4 +762,59 @@ test('off main, main moving (another process merging the branch) refreshes the v
   expect(w.runs.filter(argv => argv.includes('rev-list')).length).toBeGreaterThan(before)
   const ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Button', key: 'status-commits', text: '+0 changes' })).toBeDefined()
+})
+
+test('a lists every other branch\'s differences from main under the keys, latest branch first, read-only', async ($, on) => {
+  const { w } = await boot($, on)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Button', key: 'all', text: 'all branches (off)' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'mem-feat/x-knowledge.technical.build' })).toBeUndefined()
+  expect(w.runs.some(argv => argv.includes('for-each-ref'))).toBe(false)
+
+  await ui.press({ key: 'all' })
+  expect(await ui.find({ type: 'Button', key: 'all', text: 'all branches (on)' })).toBeDefined()
+  const refs = w.runs.find(argv => argv.includes('for-each-ref'))
+  expect(refs!.slice(refs!.indexOf('for-each-ref'))).toEqual([
+    'for-each-ref', '--sort=-committerdate', '--format=%(refname:short)%09%(committerdate:unix)%09%(objectname)', 'refs/heads',
+  ])
+  // One key-level diff per branch, main left out.
+  expect(w.runs.filter(argv => argv.includes('diff') && argv.includes('feat/x')).length).toBe(1)
+  expect(w.runs.filter(argv => argv.includes('diff') && argv.includes('feat/old')).length).toBe(1)
+  expect(w.runs.some(argv => argv.includes('diff') && argv[argv.length - 1] === 'main')).toBe(false)
+
+  // Sections in commit order, the newest branch on top, each with its count and age.
+  const heads = await ui.findAll({ type: 'Text', text: /^(feat\/x|feat\/old)$/ })
+  expect(heads.map(h => h.text)).toEqual(['feat/x', 'feat/old'])
+  expect(await ui.find({ type: 'Text', text: /^ · 3 differ from main · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ · 1 differs from main · /  })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'mem-feat/x-preferences.tools.git', text: /^- preferences\.tools\.git/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'mem-feat/old-a.b.c', text: /^\+ a\.b\.c.*only on the old branch/ })).toBeDefined()
+  // Metrics keys stay out here too.
+  expect(await ui.find({ type: 'Button', key: 'mem-feat/x-metrics.turn.feat/x' })).toBeUndefined()
+
+  // Another branch's key opens read-only: both values, no action.
+  await ui.press({ key: 'mem-feat/x-knowledge.decisions.architecture' })
+  expect(await ui.find({ type: 'Text', text: /changed on feat\/x; main holds another value/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '- Keep business logic in services/' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'act-forget' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'act-restore' })).toBeUndefined()
+  await ui.press({ key: 'back' })
+
+  // The filter narrows every section.
+  await ui.input({ key: 'filter', text: 'a.b', kind: 'change' })
+  expect(await ui.find({ type: 'Button', key: 'mem-feat/old-a.b.c' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'mem-feat/x-preferences.tools.git' })).toBeUndefined()
+  await ui.input({ key: 'filter', text: '', kind: 'change' })
+
+  await ui.press({ key: 'all' })
+  expect(await ui.find({ type: 'Button', key: 'mem-feat/old-a.b.c' })).toBeUndefined()
+})
+
+test('on a branch, the all-branches view leaves that branch to the list above it', async ($, on) => {
+  await boot($, on, { head: 'ref: refs/heads/feat/x\n' })
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'all' })
+  expect(await ui.find({ type: 'Button', key: 'mem-knowledge.technical.build' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'mem-feat/x-knowledge.technical.build' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'mem-feat/old-a.b.c' })).toBeDefined()
 })

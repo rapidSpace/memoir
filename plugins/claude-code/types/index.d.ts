@@ -78,6 +78,17 @@ export type MemoirMemories = {
   base: string | null
 }
 
+/** One branch's keys that differ from main, for the Memories tab's all-branches view. */
+export type MemoirBranchDiff = {
+  branch: string
+  /** Its last commit, seconds since the epoch. */
+  at: number
+  /** Only the keys that differ from main (`added`, `changed`, `removed`). */
+  items: MemoirMemory[]
+  /** True when both values were read (the CLI's key-level diff); false from git history alone. */
+  exact: boolean
+}
+
 export type MemoirTab = 'memories' | 'recent' | 'metrics'
 
 /**
@@ -119,6 +130,12 @@ declare module 'claude-code' {
       filter: string
       /** Memories tab: the key whose detail is open, or null for the list. */
       selected: string | null
+      /** Memories tab: the branch the open key belongs to in the all-branches view; null for the current branch. */
+      selectedBranch: string | null
+      /** Memories tab: every branch's differences from main are listed under the current one. */
+      allBranches: boolean
+      /** The ten most recently changed branches other than main, latest first, each with its differences from main. */
+      branches: MemoirBranchDiff[]
       /** Memories tab: the detail action that awaits its confirmation, if any. */
       armed: MemoirMemoryAction | null
       /** Memories tab: where the merge-to-main flow stands. */

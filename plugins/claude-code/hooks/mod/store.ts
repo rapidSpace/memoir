@@ -203,10 +203,11 @@ export async function readBranchDiff(
   store: string,
   base: string,
   since: string | null,
+  tip = 'HEAD',
 ): Promise<{ written: Set<string>; onBase: Set<string> } | null> {
   const written = since
-    ? await run(host, ['git', '-C', store, 'log', 'HEAD', `--after=${since}`, '--format=%s'])
-    : await run(host, ['git', '-C', store, 'log', `${base}..HEAD`, '--format=%s'])
+    ? await run(host, ['git', '-C', store, 'log', tip, `--after=${since}`, '--format=%s'])
+    : await run(host, ['git', '-C', store, 'log', `${base}..${tip}`, '--format=%s'])
   if (written === null) return null
   const onBase = await run(host, ['git', '-C', store, 'log', base, '--format=%s'])
   if (onBase === null) return null
@@ -333,4 +334,22 @@ export async function mergeInto(
   const text = `merged ${source} into ${target}${resolved}`
   const stuck = failure(back, `checkout ${source}`)
   return stuck ? `${text}; ${stuck}` : text
+}
+
+export type BranchHead = { branch: string; at: number; tip: string }
+
+/** Every local branch, the most recently committed first. */
+export async function listBranches(host: Host, store: string): Promise<BranchHead[]> {
+  const out = await run(host, [
+    'git', '-C', store, 'for-each-ref', '--sort=-committerdate',
+    '--format=%(refname:short)%09%(committerdate:unix)%09%(objectname)', 'refs/heads',
+  ])
+  if (!out) return []
+  const heads: BranchHead[] = []
+  for (const line of out.split('\n')) {
+    const [branch, ct, tip] = line.split('\t')
+    const at = Number(ct)
+    if (branch && tip && Number.isFinite(at)) heads.push({ branch, at, tip })
+  }
+  return heads
 }

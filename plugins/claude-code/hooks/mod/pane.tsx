@@ -4,6 +4,7 @@
 import type { EngineInterface, RenderElement } from 'claude-code'
 
 import type {
+  MemoirBranchDiff,
   MemoirCapture,
   MemoirCommitDetail,
   MemoirMemories,
@@ -34,6 +35,10 @@ export type PaneView = {
   filter: string
   /** The key whose detail is open, or null for the list. */
   selected: string | null
+  /** The branch that key belongs to in the all-branches view; null for the current branch. */
+  selectedBranch: string | null
+  allBranches: boolean
+  branches: readonly MemoirBranchDiff[]
   /** The detail action pressed once, awaiting `y`; null when none. */
   armed: MemoirMemoryAction | null
   merge: MemoirMergeState
@@ -45,7 +50,8 @@ export type PaneView = {
     toggleMetrics: () => unknown
     toggleTaxonomy: () => unknown
     setFilter: (text: string) => unknown
-    select: (key: string | null) => unknown
+    select: (key: string | null, branch?: string | null) => unknown
+    toggleAllBranches: () => unknown
     arm: (kind: MemoirMemoryAction) => unknown
     disarm: () => unknown
     apply: (m: MemoirMemory, kind: MemoirMemoryAction) => unknown
@@ -260,12 +266,20 @@ export function renderPane(view: PaneView): RenderElement {
       base === null
         ? `${fmt.plural(here.length, 'memory', 'memories')}${status.branch === 'main' ? ' on main' : ' · no main branch to compare'}`
         : `${fmt.plural(here.length, 'memory', 'memories')} · ${differing.length === 1 ? '1 differs' : `${differing.length} differ`} from ${base}`
-    const current = view.selected === null ? undefined : visible.find(m => m.key === view.selected)
+    // The open key: the current branch's, or another branch's (read-only).
+    const elsewhere = view.selectedBranch === null ? undefined : view.branches.find(b => b.branch === view.selectedBranch)
+    const current =
+      view.selected === null
+        ? undefined
+        : elsewhere
+          ? elsewhere.items.find(m => m.key === view.selected)
+          : visible.find(m => m.key === view.selected)
 
     if (current) {
       // One key: its value, or both values when main's differs, and the one
-      // write the person can ask for (behind a second press).
-      const available = fmt.memoryActions(current, base)
+      // write the person can ask for (behind a second press). Another
+      // branch's key is shown the same way, with nothing to press.
+      const available = elsewhere ? [] : fmt.memoryActions(current, base)
       const pending = view.armed === null ? undefined : available.find(a => a.kind === view.armed)
       const textWidth = Math.max(8, width - 2)
       const block = (text: string | null, sign: string, color: string | undefined) =>
@@ -274,17 +288,18 @@ export function renderPane(view: PaneView): RenderElement {
             {`${sign} ${line}`}
           </Text>
         ))
-      const branch = status.branch ?? 'this branch'
+      const branch = elsewhere ? elsewhere.branch : (status.branch ?? 'this branch')
+      const against = elsewhere ? 'main' : base
       const explain =
         current.status === 'added'
-          ? `new on ${branch}, not on ${base}`
+          ? `new on ${branch}, not on ${against}`
           : current.status === 'changed'
-            ? `changed on ${branch}; ${base} holds another value`
+            ? `changed on ${branch}; ${against} holds another value`
             : current.status === 'removed'
-              ? `on ${base} only; forgotten on ${branch}`
-              : base === null
+              ? `on ${against} only; forgotten on ${branch}`
+              : against === null
                 ? `on ${branch}`
-                : `same on ${branch} and ${base}`
+                : `same on ${branch} and ${against}`
       body = (
         <Box flexDirection="column">
           <Box>
@@ -295,7 +310,7 @@ export function renderPane(view: PaneView): RenderElement {
           <Text> </Text>
           {current.status === 'changed' || current.status === 'removed' ? (
             <Box flexDirection="column">
-              <Text dimColor>{`${base}:`}</Text>
+              <Text dimColor>{`${against}:`}</Text>
               {block(current.base, '-', 'diffRemoved')}
             </Box>
           ) : (
@@ -311,7 +326,7 @@ export function renderPane(view: PaneView): RenderElement {
             </Box>
           )}
           {(current.status === 'changed' || current.status === 'removed') && current.base === null ? (
-            <Text dimColor>{`${base}'s value could not be read: update memoir for key-level diffs.`}</Text>
+            <Text dimColor>{`${against}'s value could not be read: update memoir for key-level diffs.`}</Text>
           ) : (
             []
           )}
@@ -368,8 +383,23 @@ export function renderPane(view: PaneView): RenderElement {
     } else {
       // Off main only what differs; on main (nothing to compare) every key.
       const shown = fmt.filterMemories(base === null ? visible : differing, view.filter)
-      const keyWidth = Math.min(40, Math.max(8, ...shown.map(m => m.key.length)))
+      // Every other branch's differences from main, latest first; the current branch is the list above.
+      const others = view.allBranches ? view.branches.filter(b => b.branch !== status.branch) : []
+      const keyWidth = Math.min(
+        40,
+        Math.max(8, ...shown.map(m => m.key.length), ...others.flatMap(b => b.items.map(m => m.key.length))),
+      )
       const snippetWidth = Math.max(8, width - 2 - keyWidth - 2)
+      const row = (m: MemoirMemory, branch: string | null) => {
+        const snippet = m.content ?? m.base
+        return (
+          <Button key={branch ? `mem-${branch}-${m.key}` : `mem-${m.key}`} plain onPress={() => void actions.select(m.key, branch)}>
+            <Text color={MARK_COLOR[m.status]}>{`${fmt.MARKS[m.status]} `}</Text>
+            <Text bold={m.status !== 'same'}>{m.key.padEnd(keyWidth).slice(0, keyWidth)}</Text>
+            <Text dimColor>{`  ${snippet ? fmt.wrapLines(snippet, snippetWidth, 1)[0] ?? '' : '(content unavailable)'}`}</Text>
+          </Button>
+        )
+      }
       const groups = view.showTaxonomy ? fmt.groupTaxonomy(view.taxonomy, false) : []
       body = (
         <Box flexDirection="column">
@@ -410,17 +440,25 @@ export function renderPane(view: PaneView): RenderElement {
               {visible.length === 0 ? 'No memories yet.' : view.filter.trim() ? `No key contains "${view.filter.trim()}".` : `Nothing differs from ${base}.`}
             </Text>
           ) : (
-            shown.map(m => {
-              const snippet = m.content ?? m.base
-              return (
-                <Button key={`mem-${m.key}`} plain onPress={() => void actions.select(m.key)}>
-                  <Text color={MARK_COLOR[m.status]}>{`${fmt.MARKS[m.status]} `}</Text>
-                  <Text bold={m.status !== 'same'}>{m.key.padEnd(keyWidth).slice(0, keyWidth)}</Text>
-                  <Text dimColor>{`  ${snippet ? fmt.wrapLines(snippet, snippetWidth, 1)[0] ?? '' : '(content unavailable)'}`}</Text>
-                </Button>
-              )
-            })
+            shown.map(m => row(m, null))
           )}
+          {view.allBranches
+            ? others.map(b => {
+                const rows = fmt.filterMemories(fmt.visibleCaptures(b.items, false), view.filter)
+                return (
+                  <Box flexDirection="column" marginTop={1}>
+                    <Box>
+                      <Text bold>{b.branch}</Text>
+                      <Text dimColor>
+                        {` · ${rows.length === 1 ? '1 differs' : `${rows.length} differ`} from main · ${fmt.relativeTime(view.now, b.at)}${b.exact ? '' : ' · keys only'}`}
+                      </Text>
+                    </Box>
+                    {rows.length === 0 ? <Text dimColor>  nothing</Text> : rows.map(m => row(m, b.branch))}
+                  </Box>
+                )
+              })
+            : []}
+          {view.allBranches && others.length === 0 ? <Text dimColor>No other branch.</Text> : []}
         </Box>
       )
       footer = (
@@ -428,6 +466,9 @@ export function renderPane(view: PaneView): RenderElement {
           <Box gap={3}>
             <Button key="taxonomy" plain hotkey="t" dimColor onPress={() => void actions.toggleTaxonomy()}>
               {`taxonomy (${view.showTaxonomy ? 'on' : 'off'})`}
+            </Button>
+            <Button key="all" plain hotkey="a" dimColor onPress={() => void actions.toggleAllBranches()}>
+              {`all branches (${view.allBranches ? 'on' : 'off'})`}
             </Button>
             {base !== null && differing.length > 0 ? (
               <Button key="merge" plain hotkey="p" dimColor onPress={() => void actions.openMerge()}>
