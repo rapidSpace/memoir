@@ -32,7 +32,10 @@ export type MemoirStatus = {
   head: string | null
   /** User-facing memory count, as the shell hooks cache it. */
   memories: number | null
+  /** On a branch, the commits on top of main (after main's latest merge of the branch); on main, all commits. */
   commits: number | null
+  /** The same count without the `metrics.*` writes: what the Recent tab lists while metrics are hidden. */
+  commitsWithoutMetrics: number | null
 }
 
 /** One `metrics.turn.<branch>` accumulator the Stop hook maintains. */

@@ -35,7 +35,7 @@ const POLL_MS = 3000
 
 // The drawn state, in `$.state` so a write redraws its readers and a hot reload
 // keeps it. The engine reads these references off this file, so they live here.
-const EMPTY_STATUS: MemoirStatus = { store: null, branch: null, head: null, memories: null, commits: null }
+const EMPTY_STATUS: MemoirStatus = { store: null, branch: null, head: null, memories: null, commits: null, commitsWithoutMetrics: null }
 const status = atom({ plugin: 'memoir', key: 'status' } as const, EMPTY_STATUS)
 const captures = atom({ plugin: 'memoir', key: 'captures' } as const, [] as MemoirCapture[])
 const order = atom({ plugin: 'memoir', key: 'order' } as const, [] as string[])
@@ -130,7 +130,8 @@ export const register: Register = on => {
       for (const sha of [...contents.keys()]) if (!log.order.includes(sha)) contents.delete(sha)
 
       const memories = await store.readMemoryCount(host, path)
-      const commits = await store.countCommits(host, path)
+      const commits = await store.countCommits(host, path, { base, since })
+      const commitsWithoutMetrics = await store.countCommits(host, path, { base, since }, false)
       const tree = await store.readTaxonomy(host, path)
 
       // Every default-namespace key's value, in one batched `get`: the Memories
@@ -158,7 +159,14 @@ export const register: Register = on => {
         base: changes || history ? base : null,
       }
 
-      await update($, status, () => ({ store: path, branch: head.branch, head: log.order[0] ?? null, memories, commits }))
+      await update($, status, () => ({
+        store: path,
+        branch: head.branch,
+        head: log.order[0] ?? null,
+        memories,
+        commits,
+        commitsWithoutMetrics,
+      }))
       await update($, order, () => log.order)
       await update($, captures, () => log.entries.map(c => ({ ...c, content: contents.get(c.sha) ?? null })))
       await update($, taxonomy, () => tree)
@@ -262,7 +270,6 @@ export const register: Register = on => {
     renderPane({
       elements: $.ui.resolve(e),
       width: e.props.bodyColumns,
-      rows: e.props.scroll.bodyRows,
       now: await $.clock.now(),
       status: await read($, status),
       captures: await read($, captures),

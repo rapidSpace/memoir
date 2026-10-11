@@ -23,7 +23,9 @@ const TIMEOUT_MS = 10_000
 // A merge or a write on a large store can take a while; a kill mid-merge
 // would leave the store on main.
 const WRITE_TIMEOUT_MS = 180_000
-const LOG_WINDOW = 20
+// How many commits the Recent tab reads: on main the latest ten, on a branch up to twenty of its own.
+const MAIN_LOG_WINDOW = 10
+const BRANCH_LOG_WINDOW = 20
 
 async function exec(host: Host, argv: readonly string[], cwd?: string, timeoutMs = TIMEOUT_MS): Promise<ProcessRunResult | null> {
   try {
@@ -92,7 +94,8 @@ export type LogScope = { base: string | null; since: string | null }
 
 export async function readLog(host: Host, store: string, scope: LogScope = { base: null, since: null }): Promise<ParsedLog> {
   const range = scope.since ? ['HEAD', `--after=${scope.since}`] : scope.base ? [`${scope.base}..HEAD`] : []
-  const out = await run(host, ['git', '-C', store, 'log', ...range, '--format=%H%x09%ct%x09%s', '-n', String(LOG_WINDOW)])
+  const window = scope.base || scope.since ? BRANCH_LOG_WINDOW : MAIN_LOG_WINDOW
+  const out = await run(host, ['git', '-C', store, 'log', ...range, '--format=%H%x09%ct%x09%s', '-n', String(window)])
   return out ? parseLog(out) : { order: [], entries: [] }
 }
 
@@ -110,8 +113,20 @@ export async function mergedAt(host: Host, store: string, base: string, branch: 
   return at ? at : null
 }
 
-export async function countCommits(host: Host, store: string): Promise<number | null> {
-  const out = await run(host, ['git', '-C', store, 'rev-list', '--count', 'HEAD'])
+/**
+ * How many commits the Recent tab's scope holds: on a branch, those on top
+ * of main; on main, all of them. With `metrics` false the machine-written
+ * `metrics.*` commits are left out, as the tab leaves them out by default.
+ */
+export async function countCommits(
+  host: Host,
+  store: string,
+  scope: LogScope = { base: null, since: null },
+  metrics = true,
+): Promise<number | null> {
+  const range = scope.since ? ['HEAD', `--after=${scope.since}`] : scope.base ? [`${scope.base}..HEAD`] : ['HEAD']
+  const filter = metrics ? [] : ['--invert-grep', '--grep=^Store metrics\\.', '--grep=^Delete metrics\\.']
+  const out = await run(host, ['git', '-C', store, 'rev-list', '--count', ...filter, ...range])
   const n = Number(out?.trim())
   return out && Number.isFinite(n) ? n : null
 }

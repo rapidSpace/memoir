@@ -20,7 +20,6 @@ import * as fmt from './format'
 export type PaneView = {
   elements: ReturnType<EngineInterface['ui']['resolve']>
   width: number
-  rows: number
   now: number
   status: MemoirStatus
   captures: readonly MemoirCapture[]
@@ -82,7 +81,6 @@ export function renderPane(view: PaneView): RenderElement {
   const Input = 'Input' in view.elements ? view.elements.Input : null
   const { status, actions } = view
   const width = Math.max(20, view.width)
-  const rows = Math.max(6, view.rows)
   const open = new Set(view.expanded)
 
   const header = (
@@ -98,9 +96,36 @@ export function renderPane(view: PaneView): RenderElement {
           Metrics
         </Button>
       </Box>
-      <Text dimColor wrap="truncate-start">
-        {fmt.statusLine(status)}
-      </Text>
+      {/* Each part of the status is a shortcut to the tab that explains it. */}
+      <Box>
+        {status.branch ? (
+          <Button key="status-branch" plain dimColor onPress={() => void actions.pickTab('metrics')}>
+            {status.branch}
+          </Button>
+        ) : (
+          []
+        )}
+        {status.memories !== null ? (
+          <Box>
+            {status.branch ? <Text dimColor> · </Text> : []}
+            <Button key="status-memories" plain dimColor onPress={() => void actions.pickTab('memories')}>
+              {fmt.plural(status.memories, 'memory', 'memories')}
+            </Button>
+          </Box>
+        ) : (
+          []
+        )}
+        {status.commits !== null ? (
+          <Box>
+            {status.branch || status.memories !== null ? <Text dimColor> · </Text> : []}
+            <Button key="status-commits" plain dimColor onPress={() => void actions.pickTab('recent')}>
+              {fmt.commitsLabel(status, view.showMetrics) ?? ''}
+            </Button>
+          </Box>
+        ) : (
+          []
+        )}
+      </Box>
     </Box>
   )
 
@@ -188,13 +213,12 @@ export function renderPane(view: PaneView): RenderElement {
         </Box>
       )
     } else {
-      const limit = Math.max(1, Math.floor((rows - 3) / 3))
       body =
         shown.length === 0 ? (
           <Text dimColor>{status.branch && status.branch !== 'main' ? 'Nothing beyond main yet.' : 'No commits yet.'}</Text>
         ) : (
           <Box flexDirection="column">
-            {shown.slice(0, limit).map(c => {
+            {shown.map(c => {
               const isNew = fresh.has(c.sha)
               const lines =
                 c.kind !== 'store' ? [] : c.content ? fmt.wrapLines(c.content, width - INDENT.length, 2) : ['(content unavailable)']
