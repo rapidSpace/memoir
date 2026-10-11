@@ -1,6 +1,7 @@
 // memoir mod: a capture feed pane (/memoir:pane) and a status suffix on the
-// prompt's hint line. Read-only and purely additive: the shell hooks in
-// hooks.json keep doing capture and recall.
+// prompt's hint line. Purely additive: the shell hooks in hooks.json keep
+// doing capture and recall; the pane only writes what the person presses for
+// (forget a key, restore main's value), through the same CLI.
 //
 // Design: the Stop hook captures asynchronously, so a turn's writes land in
 // the store seconds after `turn.complete`. Instead of listening to turn
@@ -12,7 +13,18 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { MemoirCapture, MemoirMemories, MemoirStatus, MemoirTab, MemoirTurnMetrics } from '../../types'
+import type {
+  MemoirCapture,
+  MemoirCommitDetail,
+  MemoirMemories,
+  MemoirMemory,
+  MemoirMemoryAction,
+  MemoirMergeState,
+  MemoirMergeStrategy,
+  MemoirStatus,
+  MemoirTab,
+  MemoirTurnMetrics,
+} from '../../types'
 import * as fmt from './format'
 import { renderPane } from './pane'
 import * as store from './store'
@@ -30,16 +42,28 @@ const order = atom({ plugin: 'memoir', key: 'order' } as const, [] as string[])
 const turnBaseline = atom({ plugin: 'memoir', key: 'turnBaseline' } as const, null as string | null)
 const tab = atom({ plugin: 'memoir', key: 'tab' } as const, 'memories' as MemoirTab)
 const showMetrics = atom({ plugin: 'memoir', key: 'showMetrics' } as const, false)
+const showTaxonomy = atom({ plugin: 'memoir', key: 'showTaxonomy' } as const, false)
 const expanded = atom({ plugin: 'memoir', key: 'expanded' } as const, [] as string[])
 const taxonomy = atom({ plugin: 'memoir', key: 'taxonomy' } as const, {} as Record<string, number>)
 const metrics = atom({ plugin: 'memoir', key: 'metrics' } as const, {} as Record<string, MemoirTurnMetrics>)
 const memoryList = atom({ plugin: 'memoir', key: 'memories' } as const, { items: [], base: null } as MemoirMemories)
-const showAll = atom({ plugin: 'memoir', key: 'showAll' } as const, false)
+const filter = atom({ plugin: 'memoir', key: 'filter' } as const, '')
+const selected = atom({ plugin: 'memoir', key: 'selected' } as const, null as string | null)
+const armed = atom({ plugin: 'memoir', key: 'armed' } as const, null as MemoirMemoryAction | null)
+const merge = atom({ plugin: 'memoir', key: 'merge' } as const, 'idle' as MemoirMergeState)
+const commit = atom({ plugin: 'memoir', key: 'commit' } as const, null as string | null)
+const commitDetail = atom({ plugin: 'memoir', key: 'commitDetail' } as const, null as MemoirCommitDetail | null)
 
 export const register: Register = on => {
   // Rebuilt by `session.start` (which a hot reload re-runs); the drawn state
   // lives in the `$.state` atoms above and survives a reload.
   let refresh: (force?: boolean) => Promise<void> = async () => undefined
+  // The detail view's one write: forget the key, or put main's value back.
+  let apply: (m: MemoirMemory, kind: MemoirMemoryAction) => Promise<string> = async () => 'memoir store not ready'
+  // Merge the branch into main with one of the CLI's conflict strategies.
+  let mergeNow: (strategy: MemoirMergeStrategy) => Promise<string> = async () => 'memoir store not ready'
+  // What one commit changed, for the Recent tab's detail.
+  let loadCommit: (sha: string) => Promise<MemoirCommitDetail> = async sha => ({ sha, changes: null })
   let hintSuppressed = false
 
   on('session.start', async ($, e, next) => {
@@ -68,6 +92,8 @@ export const register: Register = on => {
 
     let fingerprint = ''
     let inFlight: Promise<void> | null = null
+    // While a merge checks main out and back, a poll would draw the wrong branch.
+    let merging = false
     const contents = new Map<string, string | null>() // sha → stored text
 
     const doRefresh = async (force: boolean): Promise<void> => {
@@ -85,9 +111,13 @@ export const register: Register = on => {
       // A miss is not cached: a refresh can fire while the Stop hook is still
       // writing, when `get` fails or finds nothing, so unknown contents are
       // asked for again on the next refresh (and on `r`).
-      const missing = log.entries.filter(c => !contents.has(c.sha))
+      const missing = log.entries.filter(c => c.kind === 'store' && c.key !== null && !contents.has(c.sha))
       if (missing.length > 0) {
-        const fetched = await store.fetchContents(host, path, missing)
+        const fetched = await store.fetchContents(
+          host,
+          path,
+          missing.map(c => ({ key: c.key ?? '', namespace: c.namespace ?? 'default' })),
+        )
         for (const c of missing) {
           const content = fetched.get(`${c.namespace}:${c.key}`)
           if (typeof content === 'string') contents.set(c.sha, content)
@@ -114,12 +144,15 @@ export const register: Register = on => {
         if (parsed) turnMetrics[key.slice(fmt.TURN_METRICS_PREFIX.length)] = parsed
       }
 
-      // Off main, compare with main from git history (never a checkout).
+      // Off main, compare with main: the CLI's key-level diff reads both
+      // commits from the tree (both values, never a checkout); a CLI without
+      // it leaves the comparison to git history (which keys were written).
       const base = head.branch && head.branch !== 'main' ? 'main' : null
-      const diff = base ? await store.readBranchDiff(host, path, base) : null
+      const changes = base ? await store.readKeyChanges(host, path, base) : null
+      const history = base && !changes ? await store.readBranchDiff(host, path, base) : null
       const compared: MemoirMemories = {
-        items: fmt.diffMemories(keys, current, diff),
-        base: diff ? base : null,
+        items: fmt.diffMemories(keys, current, changes, history),
+        base: changes || history ? base : null,
       }
 
       await update($, status, () => ({ store: path, branch: head.branch, head: log.order[0] ?? null, memories, commits }))
@@ -132,12 +165,45 @@ export const register: Register = on => {
 
     refresh = (force = false) => {
       if (inFlight) return inFlight
+      if (merging && !force) return Promise.resolve()
       inFlight = doRefresh(force)
         .catch(() => undefined)
         .finally(() => {
           inFlight = null
         })
       return inFlight
+    }
+
+    apply = async (m, kind) => {
+      if (!storePath) return 'memoir store not ready'
+      if (!fmt.memoryActions(m, (await read($, memoryList)).base).some(a => a.kind === kind)) return `nothing to do for ${m.key}`
+      const error =
+        kind === 'restore'
+          ? await store.restoreKey(host, storePath, m.key, m.base ?? '')
+          : await store.forgetKey(host, storePath, m.key)
+      await refresh(true)
+      return error ?? (kind === 'restore' ? `${m.key}: restored` : `${m.key}: forgotten`)
+    }
+
+    loadCommit = async sha => {
+      if (!storePath) return { sha, changes: null }
+      const changes = await store.readKeyChanges(host, storePath, `${sha}~1`, sha)
+      return { sha, changes: changes ? [...changes.values()] : null }
+    }
+
+    mergeNow = async strategy => {
+      const current = await read($, status)
+      const base = (await read($, memoryList)).base
+      if (!storePath || !current.branch) return 'memoir store not ready'
+      if (!base) return 'nothing to merge: not on a branch compared with main'
+      const values = new Map((await read($, memoryList)).items.map(m => [m.key, m.content]))
+      merging = true
+      try {
+        return await store.mergeInto(host, storePath, current.branch, base, strategy, values)
+      } finally {
+        merging = false
+        await refresh(true)
+      }
     }
 
     void refresh(true)
@@ -204,12 +270,46 @@ export const register: Register = on => {
       taxonomy: await read($, taxonomy),
       metrics: await read($, metrics),
       memories: await read($, memoryList),
-      showAll: await read($, showAll),
+      filter: await read($, filter),
+      selected: await read($, selected),
+      armed: await read($, armed),
+      merge: await read($, merge),
+      commit: await read($, commit),
+      commitDetail: await read($, commitDetail),
+      showTaxonomy: await read($, showTaxonomy),
       expanded: await read($, expanded),
       actions: {
         pickTab: next => update($, tab, () => next),
         toggleMetrics: () => update($, showMetrics, v => !v),
-        toggleAll: () => update($, showAll, v => !v),
+        toggleTaxonomy: () => update($, showTaxonomy, v => !v),
+        setFilter: text => update($, filter, () => text),
+        select: async key => {
+          await update($, armed, () => null)
+          await update($, selected, () => key)
+        },
+        arm: kind => update($, armed, () => kind),
+        disarm: () => update($, armed, () => null),
+        apply: async (m, kind) => {
+          await update($, armed, () => null)
+          await update($, selected, () => null)
+          $.ui.toast(await apply(m, kind))
+        },
+        openCommit: async sha => {
+          await update($, commitDetail, () => null)
+          await update($, commit, () => sha)
+          if (sha === null) return
+          const detail = await loadCommit(sha)
+          // Still the one open? A quick second click may have moved on.
+          if ((await read($, commit)) === sha) await update($, commitDetail, () => detail)
+        },
+        openMerge: () => update($, merge, () => 'choose'),
+        cancelMerge: () => update($, merge, () => 'idle'),
+        runMerge: async strategy => {
+          await update($, merge, () => 'running')
+          const text = await mergeNow(strategy)
+          await update($, merge, () => 'idle')
+          $.ui.toast(text)
+        },
         toggleGroup: name =>
           update($, expanded, names => (names.includes(name) ? names.filter(n => n !== name) : [...names, name])),
         refresh: () => refresh(true),

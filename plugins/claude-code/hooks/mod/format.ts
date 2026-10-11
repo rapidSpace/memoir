@@ -2,7 +2,7 @@
 // and rendering the one-line hint and the plain-text fallback. Nothing here
 // touches `$`, so every rule is unit-testable without a store.
 
-import type { MemoirCapture, MemoirMemory, MemoirStatus, MemoirTurnMetrics } from '../../types'
+import type { MemoirCapture, MemoirKeyChange, MemoirMemory, MemoirMemoryAction, MemoirStatus, MemoirTurnMetrics } from '../../types'
 
 export type LogEntry = Omit<MemoirCapture, 'content'>
 
@@ -14,8 +14,9 @@ export type ParsedLog = {
 }
 
 const SUBJECT = /^Store (\S+) in (\S+)$/
+const DELETION = /^Delete (\S+) from (\S+)$/
 
-/** Parse `git log --format=%H%x09%ct%x09%s` output. */
+/** Parse `git log --format=%H%x09%ct%x09%s` output: every commit, keyed ones recognised. */
 export function parseLog(stdout: string): ParsedLog {
   const order: string[] = []
   const entries: LogEntry[] = []
@@ -24,9 +25,19 @@ export function parseLog(stdout: string): ParsedLog {
     if (!sha || !ct) continue
     order.push(sha)
     const at = Number(ct)
-    const match = SUBJECT.exec(rest.join('\t'))
-    if (!match || !Number.isFinite(at)) continue
-    entries.push({ sha, at, key: match[1]!, namespace: match[2]! })
+    if (!Number.isFinite(at)) continue
+    const subject = rest.join('\t')
+    const stored = SUBJECT.exec(subject)
+    const deleted = stored ? null : DELETION.exec(subject)
+    const match = stored ?? deleted
+    entries.push({
+      sha,
+      at,
+      subject,
+      kind: stored ? 'store' : deleted ? 'delete' : 'other',
+      key: match ? match[1]! : null,
+      namespace: match ? match[2]! : null,
+    })
   }
   return { order, entries }
 }
@@ -43,8 +54,8 @@ export function parseStoredKeys(subjects: string): Set<string> {
 
 export const isMetric = (key: string): boolean => key.startsWith('metrics.')
 
-export function visibleCaptures<T extends { key: string }>(captures: readonly T[], showMetrics: boolean): T[] {
-  return captures.filter(c => showMetrics || !isMetric(c.key))
+export function visibleCaptures<T extends { key: string | null }>(captures: readonly T[], showMetrics: boolean): T[] {
+  return captures.filter(c => showMetrics || c.key === null || !isMetric(c.key))
 }
 
 /**
@@ -58,14 +69,14 @@ export function newShas(order: readonly string[], baseline: string | null): Set<
   return new Set(order.slice(0, i === -1 ? order.length : i))
 }
 
-/** Captures that landed this turn, metrics excluded: the hint line's `+N`. */
+/** Memories stored this turn, metrics excluded: the hint line's `+N`. */
 export function newCount(
-  captures: readonly { sha: string; key: string }[],
+  captures: readonly { sha: string; kind: string; key: string | null }[],
   order: readonly string[],
   baseline: string | null,
 ): number {
   const fresh = newShas(order, baseline)
-  return captures.filter(c => fresh.has(c.sha) && !isMetric(c.key)).length
+  return captures.filter(c => fresh.has(c.sha) && c.kind === 'store' && c.key !== null && !isMetric(c.key)).length
 }
 
 /** Read `.git/HEAD`: a branch name, or the short sha of a detached head. */
@@ -185,12 +196,19 @@ export function textSummary(
     lines.push('No captures yet.')
     return lines.join('\n')
   }
-  lines.push('Recent captures:')
+  lines.push('Recent commits:')
   for (const c of shown) {
     const content = c.content ? `: ${wrapLines(c.content, 80, 1)[0] ?? ''}` : ''
-    lines.push(`  ${relativeTime(nowMs, c.at).padEnd(12)} ${c.key}${content}`)
+    lines.push(`  ${relativeTime(nowMs, c.at).padEnd(12)} ${c.subject}${content}`)
   }
   return lines.join('\n')
+}
+
+/** `2026-10-11 04:47` in the local time zone. */
+export function absoluteTime(atSec: number): string {
+  const d = new Date(atSec * 1000)
+  const two = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`
 }
 
 export const TURN_METRICS_PREFIX = 'metrics.turn.'
@@ -268,20 +286,80 @@ export function bar(value: number, max: number, width: number): string {
 }
 
 /**
- * Compare the branch's keys with main from git history: a key the branch
- * wrote since leaving main is `changed` when main's history ever stored it,
- * else `added`; everything else is `same`. With no comparison (`diff` null)
- * every key is `same`; the caller records that no base was compared.
+ * Compare the branch's keys with main. With `changes` (the CLI's key-level
+ * diff, both values known) every difference is exact, and a key main holds
+ * that the branch dropped is listed as `removed`. Without it, from git
+ * history alone: a key the branch wrote since leaving main is `changed` when
+ * main's history ever stored it, else `added`, and main's values stay unknown.
+ * With neither, every key is `same`; the caller records that no base was compared.
  */
 export function diffMemories(
   keys: readonly string[],
   current: ReadonlyMap<string, string | null>,
-  diff: { written: ReadonlySet<string>; onBase: ReadonlySet<string> } | null,
+  changes: ReadonlyMap<string, MemoirKeyChange> | null,
+  history: { written: ReadonlySet<string>; onBase: ReadonlySet<string> } | null,
 ): MemoirMemory[] {
-  return [...keys].sort().map(key => {
+  const items: MemoirMemory[] = [...keys].sort().map(key => {
     const content = current.get(key) ?? null
+    const change = changes?.get(key)
+    if (changes) {
+      const status: MemoirMemory['status'] = change?.operation === 'added' ? 'added' : change?.operation === 'modified' ? 'changed' : 'same'
+      return { key, content, base: change?.old ?? null, status }
+    }
     let status: MemoirMemory['status'] = 'same'
-    if (diff && diff.written.has(key)) status = diff.onBase.has(key) ? 'changed' : 'added'
-    return { key, content, status }
+    if (history && history.written.has(key)) status = history.onBase.has(key) ? 'changed' : 'added'
+    return { key, content, base: null, status }
   })
+  if (changes) {
+    const present = new Set(keys)
+    for (const change of changes.values()) {
+      if (change.operation === 'removed' && !present.has(change.key)) {
+        items.push({ key: change.key, content: null, base: change.old, status: 'removed' })
+      }
+    }
+    items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+  }
+  return items
+}
+
+/** The memories whose key contains `query` (case-insensitive); all of them for a blank query. */
+export function filterMemories<T extends { key: string }>(items: readonly T[], query: string): T[] {
+  const q = query.trim().toLowerCase()
+  return q ? items.filter(m => m.key.toLowerCase().includes(q)) : [...items]
+}
+
+/** Wrap each line of `text` (newlines kept) to `width`, at most `max` lines in all. */
+export function wrapText(text: string, width: number, max: number): string[] {
+  const out: string[] = []
+  for (const paragraph of text.split('\n')) {
+    if (out.length >= max) break
+    if (!paragraph.trim()) {
+      out.push('')
+      continue
+    }
+    out.push(...wrapLines(paragraph, width, max - out.length))
+  }
+  return out.slice(0, max)
+}
+
+export const MARKS: Record<MemoirMemory['status'], string> = { added: '+', changed: '~', removed: '-', same: ' ' }
+
+export type MemoryAction = { verb: string; kind: MemoirMemoryAction; hotkey: string }
+
+/**
+ * What the detail view can do to a memory: forget it on this branch (any key
+ * that is here), and put main's value back (a key main holds, when that
+ * value could be read). A `~` key offers both.
+ */
+export function memoryActions(m: MemoirMemory, base: string | null): MemoryAction[] {
+  const actions: MemoryAction[] = []
+  if (m.status !== 'removed') actions.push({ verb: 'forget key', kind: 'forget', hotkey: 'd' })
+  if ((m.status === 'changed' || m.status === 'removed') && m.base !== null) {
+    actions.push({
+      verb: m.status === 'changed' ? `restore ${base ?? 'main'}'s value` : `restore from ${base ?? 'main'}`,
+      kind: 'restore',
+      hotkey: 'u',
+    })
+  }
+  return actions
 }

@@ -1505,6 +1505,60 @@ class BranchService(BaseService):
                 "error": str(e),
             }
 
+    def diff_keys(self, ref1: str, ref2: str) -> list[dict[str, Any]]:
+        """Key-level changes from ``ref1`` to ``ref2``, read without a checkout.
+
+        Asks the prolly tree for the two commits' key sets directly, so HEAD
+        never moves: unlike ``--branch`` routing (``routed_to``), a writer
+        landing mid-call cannot end up on the wrong branch (issue #179).
+
+        Each entry is ``{"namespace", "key", "operation", "old", "new"}``:
+        ``operation`` is ``added``, ``modified`` or ``removed``; ``old`` and
+        ``new`` are the decoded stored values (the dict ``get`` returns), None
+        on the side that lacks the key. Sorted by namespace, then key.
+
+        Raises:
+            StoreNotFoundError: If the store path doesn't exist.
+            ValueError: If either ref does not resolve to a commit.
+        """
+        if not Path(self.store_path).exists():
+            raise StoreNotFoundError(self.store_path)
+
+        # The tree resolves branch names and full shas, not revisions such
+        # as HEAD~1; git turns anything it understands into a sha first.
+        def resolve(ref: str) -> str:
+            result = self._run_git_command(["rev-parse", "--verify", ref], check=False)
+            if result.returncode != 0:
+                raise ValueError(f"Unknown ref: {ref}")
+            return result.stdout.strip()
+
+        store = self._get_store()
+        changes: list[dict[str, Any]] = []
+        for kv in store.tree.diff(resolve(ref1), resolve(ref2)):
+            full = kv.key.decode("utf-8") if isinstance(kv.key, bytes) else str(kv.key)
+            namespace, sep, key = full.partition(":")
+            if not sep:
+                namespace, key = "default", full
+            op = kv.operation
+            kind = op.operation_type
+            if kind == "Modified":
+                old, new = op.old_value, op.new_value
+            elif kind == "Added":
+                old, new = None, op.value
+            else:
+                old, new = op.value, None
+            changes.append(
+                {
+                    "namespace": namespace,
+                    "key": key,
+                    "operation": kind.lower(),
+                    "old": store._decode_value(old) if old else None,
+                    "new": store._decode_value(new) if new else None,
+                }
+            )
+        changes.sort(key=lambda c: (c["namespace"], c["key"]))
+        return changes
+
     # Alias kept because the CLI command (cli/commands/branch.py:314) calls
     # `service.get_diff(...)`. Rather than touching two call sites, expose
     # both names. New callers should prefer `diff()`.

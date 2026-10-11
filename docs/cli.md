@@ -521,7 +521,7 @@ The rest of the CLI surface is documented inline via `--help`. Command groups at
 |---|---|---|
 | Store | `new`, `connect`, `status`, `refresh` | `memoir new --help` |
 | Memory | `remember`, `recall`, `get`, `forget` | `memoir remember --help` |
-| Branch | `branch`, `checkout`, `merge`, `time-travel`, `diff`, `branch-match` | `memoir branch --help` |
+| Branch | `branch`, `checkout`, `merge`, `time-travel`, `diff`, `branch-match` — `diff <a> <b>` lists the memories that differ between two refs (`+` added, `~` modified, `-` removed; `--json` adds `changes` with both values), read from the tree without checking either out | `memoir branch --help` |
 | Crypto | `proof`, `verify`, `blame` | `memoir proof --help` |
 | Analysis | `summarize` | `memoir summarize --help` |
 | Cloud sync | `remote`, `push`, `pull`, `fetch` — stores addressed as `<owner>/<store>` (requires `MEMOIR_API_KEY`; see [Cloud Sync](cloud.md)) | `memoir push --help` |

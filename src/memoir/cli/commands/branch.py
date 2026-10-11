@@ -5,6 +5,8 @@ Branch commands for memoir CLI.
 Commands: branch, checkout, merge, time-travel, diff, branch-match
 """
 
+import logging
+
 import click
 
 from memoir.cli.main import (
@@ -15,6 +17,8 @@ from memoir.cli.main import (
     MemoirContext,
     pass_context,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @click.command()
@@ -495,12 +499,34 @@ def diff(ctx: MemoirContext, commit1: str, commit2: str, stat: bool):
             )
         diff_output = result.get("diff", "")
 
+        # Which memories differ, read from the tree without moving HEAD. The
+        # git diff above only covers the tree's root pointer, so this is the
+        # part a reader can act on; older stores that cannot compare keys
+        # still get the git diff alone.
+        try:
+            changes = service.diff_keys(c1, c2)
+        except Exception as e:
+            logger.debug(f"Key-level diff unavailable for {c1}..{c2}: {e}")
+            changes = []
+
         if ctx.json_output:
-            ctx.output({"diff": diff_output, "from": c1, "to": c2})
+            ctx.output({"diff": diff_output, "from": c1, "to": c2, "changes": changes})
         else:
-            if not diff_output:
+            markers = {
+                "added": ("+", "green"),
+                "removed": ("-", "red"),
+                "modified": ("~", "yellow"),
+            }
+            for change in changes:
+                marker, color = markers[change["operation"]]
+                click.echo(
+                    click.style(
+                        f"{marker} {change['namespace']}:{change['key']}", fg=color
+                    )
+                )
+            if not changes and not diff_output:
                 click.echo("No differences found.")
-            else:
+            elif not changes:
                 # Colorize diff output
                 for line in diff_output.split("\n"):
                     if line.startswith("+") and not line.startswith("+++"):

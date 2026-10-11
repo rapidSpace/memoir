@@ -7,6 +7,7 @@
 
 import type { FsStat, ProcessRunInit, ProcessRunResult } from 'claude-code'
 
+import type { MemoirKeyChange, MemoirMergeStrategy } from '../../types'
 import { parseHead, parseLog, parseStoredKeys, type ParsedLog } from './format'
 
 export type Host = {
@@ -19,15 +20,22 @@ export type Host = {
 }
 
 const TIMEOUT_MS = 10_000
+// A merge or a write on a large store can take a while; a kill mid-merge
+// would leave the store on main.
+const WRITE_TIMEOUT_MS = 180_000
 const LOG_WINDOW = 20
 
-async function run(host: Host, argv: readonly string[], cwd?: string): Promise<string | null> {
+async function exec(host: Host, argv: readonly string[], cwd?: string, timeoutMs = TIMEOUT_MS): Promise<ProcessRunResult | null> {
   try {
-    const result = await host.run(argv, { timeoutMs: TIMEOUT_MS, ...(cwd ? { cwd } : {}) })
-    return result.exitCode === 0 ? result.stdout : null
+    return await host.run(argv, { timeoutMs, ...(cwd ? { cwd } : {}) })
   } catch {
     return null
   }
+}
+
+async function run(host: Host, argv: readonly string[], cwd?: string): Promise<string | null> {
+  const result = await exec(host, argv, cwd)
+  return result && result.exitCode === 0 ? result.stdout : null
 }
 
 async function readText(host: Host, path: string): Promise<string> {
@@ -152,15 +160,151 @@ export async function readTaxonomy(host: Host, store: string): Promise<Record<st
  * added or changed, from git metadata alone. Never `memoir get --branch`:
  * the CLI routes that by checking main out and back, and a Stop-hook write
  * in that window lands on main. Null when main cannot be compared.
+ *
+ * A memoir merge commit on main has one parent, so `main..HEAD` keeps
+ * listing the merged commits; after the latest merge of this branch into
+ * main only the branch's later writes count.
  */
 export async function readBranchDiff(
   host: Host,
   store: string,
   base: string,
 ): Promise<{ written: Set<string>; onBase: Set<string> } | null> {
-  const written = await run(host, ['git', '-C', store, 'log', `${base}..HEAD`, '--format=%s'])
+  const head = await readHead(host, store)
+  const mergedAt = head.branch
+    ? await run(host, [
+        'git', '-C', store, 'log', base, '-n', '1', '--format=%cI', '--fixed-strings',
+        `--grep=Merge branch '${head.branch}' into ${base}`,
+      ])
+    : null
+  const since = mergedAt?.trim()
+  const written = since
+    ? await run(host, ['git', '-C', store, 'log', 'HEAD', `--after=${since}`, '--format=%s'])
+    : await run(host, ['git', '-C', store, 'log', `${base}..HEAD`, '--format=%s'])
   if (written === null) return null
   const onBase = await run(host, ['git', '-C', store, 'log', base, '--format=%s'])
   if (onBase === null) return null
   return { written: parseStoredKeys(written), onBase: parseStoredKeys(onBase) }
+}
+
+function contentOf(value: unknown): string | null {
+  if (typeof value === 'string') return value
+  if (value && typeof value === 'object' && typeof (value as { content?: unknown }).content === 'string') {
+    return (value as { content: string }).content
+  }
+  return null
+}
+
+/**
+ * Every default-namespace key that differs between `from` and `to`, with
+ * both values: `memoir diff <from> <to>`, which reads the two commits
+ * straight from the tree and never checks anything out. Null when the CLI
+ * predates key-level diffs (no `changes` in its answer) or fails; the caller
+ * then falls back to the git-history comparison.
+ */
+export async function readKeyChanges(
+  host: Host,
+  store: string,
+  from: string,
+  to = 'HEAD',
+): Promise<Map<string, MemoirKeyChange> | null> {
+  const out = await run(host, [...cli(host, store), 'diff', from, to], store)
+  if (!out) return null
+  try {
+    const parsed = JSON.parse(out) as {
+      changes?: { namespace?: string; key?: string; operation?: string; old?: unknown; new?: unknown }[]
+    }
+    if (!Array.isArray(parsed.changes)) return null
+    const changes = new Map<string, MemoirKeyChange>()
+    for (const c of parsed.changes) {
+      if (c.namespace !== 'default' || typeof c.key !== 'string') continue
+      if (c.operation !== 'added' && c.operation !== 'modified' && c.operation !== 'removed') continue
+      changes.set(c.key, { key: c.key, operation: c.operation, old: contentOf(c.old), new: contentOf(c.new) })
+    }
+    return changes
+  } catch {
+    return null
+  }
+}
+
+function failure(result: ProcessRunResult | null, what: string): string | null {
+  if (result && result.exitCode === 0) return null
+  const detail = result ? (result.stderr || result.stdout).trim().split('\n').pop() ?? '' : 'could not run the memoir CLI'
+  return `${what} failed${detail ? `: ${detail}` : ''}`
+}
+
+/** Delete `key` on the checked-out branch; the error text on failure, else null. */
+export async function forgetKey(host: Host, store: string, key: string): Promise<string | null> {
+  const result = await exec(host, [...cli(host, store), 'forget', '-n', 'default', '--force', '--', key], store, WRITE_TIMEOUT_MS)
+  return failure(result, `forget ${key}`)
+}
+
+/** Write `content` at `key` on the checked-out branch, replacing what is there; the error text on failure, else null. */
+export async function restoreKey(host: Host, store: string, key: string, content: string): Promise<string | null> {
+  const result = await exec(
+    host,
+    [...cli(host, store), 'remember', '-p', key, '-n', 'default', '--replace', '--', content],
+    store,
+    WRITE_TIMEOUT_MS,
+  )
+  return failure(result, `restore ${key}`)
+}
+
+/**
+ * Merge `source` into `target` with the CLI's native three-way merge, then
+ * check `source` out again: `merge --into` leaves the store on the target.
+ * `ours` and `theirs` are the CLI's own strategies; `both` merges with `ours`
+ * and, still on the target, appends the branch's value (from `values`) to
+ * each key the merge reported as changed on both sides. Resolves to one line
+ * for a toast.
+ */
+export async function mergeInto(
+  host: Host,
+  store: string,
+  source: string,
+  target: string,
+  strategy: MemoirMergeStrategy,
+  values: ReadonlyMap<string, string | null>,
+): Promise<string> {
+  const native = strategy === 'both' ? 'ours' : strategy
+  const merged = await exec(host, [...cli(host, store), 'merge', source, '--into', target, '-S', native], store, WRITE_TIMEOUT_MS)
+  let parsed: { conflicts?: unknown; error?: unknown } = {}
+  try {
+    parsed = JSON.parse(merged?.stdout ?? '') as typeof parsed
+  } catch {
+    // not JSON: the exit code tells
+  }
+  const conflicts = (Array.isArray(parsed.conflicts) ? parsed.conflicts : [])
+    .filter((k): k is string => typeof k === 'string' && k.startsWith('default:'))
+    .map(k => k.slice('default:'.length))
+
+  let appended = 0
+  let unappended = 0
+  if (merged && merged.exitCode === 0 && strategy === 'both') {
+    for (const key of conflicts) {
+      const content = values.get(key)
+      if (content === null || content === undefined) {
+        unappended += 1
+        continue
+      }
+      const result = await exec(
+        host,
+        [...cli(host, store), 'remember', '-p', key, '-n', 'default', '--merge-policy', 'append', '--', content],
+        store,
+        WRITE_TIMEOUT_MS,
+      )
+      if (result && result.exitCode === 0) appended += 1
+      else unappended += 1
+    }
+  }
+
+  const back = await exec(host, [...cli(host, store), 'checkout', source], store, WRITE_TIMEOUT_MS)
+  const failed = failure(merged, `merge into ${target}`)
+  if (failed) return typeof parsed.error === 'string' ? `merge into ${target} failed: ${parsed.error}` : failed
+  const n = conflicts.length
+  const both = `${appended} appended${unappended ? `, ${unappended} not appended` : ''}`
+  const resolved = n ? `, ${n} ${n === 1 ? 'key' : 'keys'} changed on both sides: ${strategy === 'both' ? both : strategy}` : ''
+  const text = `merged ${source} into ${target}${resolved}`
+  const stuck = failure(back, `checkout ${source}`)
+  return stuck ? `${text}; ${stuck}` : text
 }
