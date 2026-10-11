@@ -473,14 +473,15 @@ export function renderPane(view: PaneView): RenderElement {
       footer = (
         <Box justifyContent="space-between">
           <Box gap={3}>
-            <Button key="taxonomy" plain hotkey="t" dimColor onPress={() => void actions.toggleTaxonomy()}>
+            {/* No letter hotkeys on these three: a click, or Tab and Enter, so a stray key never toggles them. */}
+            <Button key="taxonomy" plain dimColor onPress={() => void actions.toggleTaxonomy()}>
               {`taxonomy (${view.showTaxonomy ? 'on' : 'off'})`}
             </Button>
-            <Button key="all" plain hotkey="a" dimColor onPress={() => void actions.toggleAllBranches()}>
+            <Button key="all" plain dimColor onPress={() => void actions.toggleAllBranches()}>
               {`all branches (${view.allBranches ? 'on' : 'off'})`}
             </Button>
             {base !== null && differing.length > 0 ? (
-              <Button key="merge" plain hotkey="p" dimColor onPress={() => void actions.openMerge()}>
+              <Button key="merge" plain dimColor onPress={() => void actions.openMerge()}>
                 {`merge to ${base}`}
               </Button>
             ) : (
