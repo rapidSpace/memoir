@@ -85,8 +85,11 @@ export async function fingerprint(host: Host, store: string): Promise<string> {
   const head = await readHead(host, store)
   const headMtime = await mtime(host, `${store}/.git/HEAD`)
   const refMtime = head.ref ? await mtime(host, `${store}/.git/${head.ref}`) : 0
-  const packedMtime = refMtime ? 0 : await mtime(host, `${store}/.git/packed-refs`)
-  return `${head.branch ?? ''}:${headMtime}:${refMtime}:${packedMtime}`
+  // Off main the view compares with main, so main moving (another worktree
+  // or process merging this branch, say) must redraw it too.
+  const mainMtime = head.branch && head.branch !== 'main' ? await mtime(host, `${store}/.git/refs/heads/main`) : 0
+  const packedMtime = refMtime && (mainMtime || head.branch === 'main') ? 0 : await mtime(host, `${store}/.git/packed-refs`)
+  return `${head.branch ?? ''}:${headMtime}:${refMtime}:${mainMtime}:${packedMtime}`
 }
 
 /** Which commits the Recent tab lists: on a branch, those not on `base` (after `since`, when main took a merge of the branch). */

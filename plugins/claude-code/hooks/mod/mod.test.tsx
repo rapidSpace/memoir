@@ -93,6 +93,8 @@ type World = {
   settings: Record<string, unknown>
   surfaces: string[]
   mtime: number
+  /** mtime of `refs/heads/main`, watched while off main. */
+  mainMtime: number
   placed: boolean
   cliFails: boolean
   /** A memoir CLI that predates key-level diffs: `diff` answers without `changes`. */
@@ -116,6 +118,7 @@ function world(on: On, overrides: Partial<World> = {}) {
     settings: {},
     surfaces: ['terminal'],
     mtime: 1000,
+    mainMtime: 500,
     placed: true,
     cliFails: false,
     oldCli: false,
@@ -132,7 +135,9 @@ function world(on: On, overrides: Partial<World> = {}) {
   on('session.surfaces', () => ({ value: w.surfaces as never }))
   on('ui.open', () => ({ value: (w.placed ? { isPlaced: true } : { isPlaced: false, reason: 'narrow' }) as never }))
   on('fs.exists', () => ({ value: w.exists }))
-  on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: w.mtime, isLink: false } }))
+  on('fs.stat', ($, e) => ({
+    value: { kind: 'file', size: 1, mtimeMs: e.path.endsWith('refs/heads/main') ? w.mainMtime : w.mtime, isLink: false },
+  }))
   on('fs.read', ($, e) => ({
     value: e.path.endsWith('/HEAD') ? w.head : e.path.endsWith('plugin-statusline-cache') ? w.cache : '',
   }))
@@ -267,6 +272,8 @@ test('hintTail and textSummary', () => {
   expect(fmt.commitsLabel(status, false)).toBe('40 commits')
   expect(fmt.commitsLabel({ ...status, branch: 'feat/x' }, false)).toBe('+40 changes')
   expect(fmt.commitsLabel({ ...status, commitsWithoutMetrics: null }, false)).toBe('61 commits')
+  // The plain-text summary lists non-metric commits, so its count leaves metrics out.
+  expect(fmt.textSummary({ ...status, branch: 'feat/x' }, [], 0)).toContain('memoir: feat/x · 18 memories · +40 changes')
   expect(fmt.hintTail(status, 0)).toBe('memoir: main · 18 memories')
   expect(fmt.hintTail(status, 2)).toBe('memoir: main · 18 memories · +2 this turn')
   expect(fmt.hintTail({ ...status, memories: 1 }, 0)).toBe('memoir: main · 1 memory')
@@ -714,4 +721,21 @@ test('the header count leaves metrics writes out while the Recent tab hides them
   await ui.press({ key: 'tab-recent' })
   await ui.press({ key: 'metrics' })
   expect(await ui.find({ type: 'Button', key: 'status-commits', text: '+6 changes' })).toBeDefined()
+})
+
+test('off main, main moving (another process merging the branch) refreshes the view', async ($, on) => {
+  const { w, clock } = await boot($, on, { head: 'ref: refs/heads/feat/x\n', count: '6\n', countNoMetrics: '1\n' })
+  const before = w.runs.filter(argv => argv.includes('rev-list')).length
+  // Nothing moved: a poll runs no git.
+  await clock.advance(3000)
+  expect(w.runs.filter(argv => argv.includes('rev-list')).length).toBe(before)
+  // main took the branch: its ref is rewritten while HEAD and the branch ref stay.
+  w.mainMtime = 900
+  w.mergedAt = '2023-11-14T22:15:00+00:00\n'
+  w.count = '0\n'
+  w.countNoMetrics = '0\n'
+  await clock.advance(3000)
+  expect(w.runs.filter(argv => argv.includes('rev-list')).length).toBeGreaterThan(before)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Button', key: 'status-commits', text: '+0 changes' })).toBeDefined()
 })
