@@ -1402,3 +1402,107 @@ class TestPullLinks:
         res = _invoke(runner, ["-s", str(linked_store), "--json", "pull"], env=env)
         assert res.exit_code == 0, res.output
         assert json.loads(res.output)["linked"] is False
+
+
+class TestPushToAndForce:
+    """`push --to` writes the cloud branch under another name; `push --force`
+    overwrites a cloud branch that is ahead and parks its old tip first."""
+
+    def test_push_to_writes_the_cloud_branch_under_another_name(
+        self, runner, linked_store, cloud, env
+    ):
+        res = _invoke(
+            runner,
+            [
+                "-s",
+                str(linked_store),
+                "--json",
+                "push",
+                "--to",
+                "main-conflict-20261011-0930",
+            ],
+            env=env,
+        )
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)
+        assert data["branch"] == "main"
+        assert data["to"] == "main-conflict-20261011-0930"
+        assert data["forced"] is False
+        repo = cloud.state.repo_for(HANDLE, "demo")
+        assert _git(
+            repo, "rev-parse", "refs/heads/main-conflict-20261011-0930"
+        ) == _git(linked_store, "rev-parse", "main")
+        # The plain name was never written.
+        assert "main-conflict" in _git(
+            repo, "for-each-ref", "--format=%(refname:short)"
+        )
+        assert (
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/main",
+                ],
+                capture_output=True,
+            ).returncode
+            != 0
+        )
+
+    def test_push_to_refuses_cloud_owned_names(self, runner, linked_store, env):
+        res = runner.invoke(
+            cli, ["-s", str(linked_store), "push", "--to", "cloud/proposal"], env=env
+        )
+        assert res.exit_code != 0
+        assert "cloud-owned" in res.output
+
+    def test_push_force_overwrites_an_ahead_cloud_branch_and_parks_its_tip(
+        self, runner, linked_store, cloud, env, tmp_root
+    ):
+        _invoke(runner, ["-s", str(linked_store), "push"], env=env)
+        # Another machine moves the cloud ahead.
+        other = _second_machine(runner, env, tmp_root / "other")
+        _remember(runner, other, "workflow.other", "theirs")
+        res = _invoke(runner, ["-s", str(other), "push"], env=env)
+        assert res.exit_code == 0, res.output
+        cloud_tip = _git(
+            cloud.state.repo_for(HANDLE, "demo"), "rev-parse", "refs/heads/main"
+        )
+
+        # This machine diverges: a plain push is refused, a forced one wins.
+        _remember(runner, linked_store, "workflow.mine", "mine")
+        res = runner.invoke(cli, ["-s", str(linked_store), "push"], env=env)
+        assert res.exit_code == EXIT_NON_FF
+        res = _invoke(
+            runner, ["-s", str(linked_store), "--json", "push", "--force"], env=env
+        )
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)
+        assert data["forced"] is True
+        assert data["backup_ref"] == "refs/memoir/backup/main"
+        assert _git(linked_store, "rev-parse", "refs/memoir/backup/main") == cloud_tip
+        assert _git(
+            cloud.state.repo_for(HANDLE, "demo"), "rev-parse", "refs/heads/main"
+        ) == _git(linked_store, "rev-parse", "main")
+
+
+class TestPushSkipsDeadNodes:
+    def test_push_uploads_only_reachable_chunks(self, runner, linked_store, cloud, env):
+        """A dead node file (nothing reaches it) is neither uploaded nor
+        counted; `memoir gc` is the way to drop it locally."""
+        nodes = linked_store / ".git" / "prolly" / "nodes" / "files"
+        dead = "f" * 64
+        (nodes / dead).write_bytes(b"\x00" * 64)
+        res = _invoke(runner, ["-s", str(linked_store), "--json", "push"], env=env)
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)
+        assert data["pushed"] is True
+        assert dead not in cloud.state.chunks_for(HANDLE, "demo")
+        assert data["chunks_uploaded"] + data["chunks_present"] == len(
+            cloud.state.chunks_for(HANDLE, "demo")
+        )
+        res = _invoke(runner, ["-s", str(linked_store), "--json", "gc"])
+        assert json.loads(res.output)["orphans"] >= 1

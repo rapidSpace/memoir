@@ -656,6 +656,9 @@ class PushResult:
     chunks_uploaded: int
     chunks_present: int
     pushed: bool
+    to: str = ""  # the cloud branch written (the local name unless --to)
+    forced: bool = False  # the cloud branch was overwritten (--force)
+    backup_ref: str | None = None  # where the cloud's previous tip was parked
     seconds: float = 0.0  # whole push
     chunk_seconds: float = 0.0  # negotiate/diff + batch uploads
     git_seconds: float = 0.0  # git push (including a missing-chunk retry)
@@ -665,6 +668,9 @@ class PushResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "branch": self.branch,
+            "to": self.to or self.branch,
+            "forced": self.forced,
+            "backup_ref": self.backup_ref,
             "origin": self.address,
             "chunks_uploaded": self.chunks_uploaded,
             "chunks_present": self.chunks_present,

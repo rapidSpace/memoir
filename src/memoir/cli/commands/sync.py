@@ -260,6 +260,18 @@ def remote_remove(ctx: MemoirContext, remote_name: str):
 )
 @click.option("--url", help="Gateway URL for --create (default: MEMOIR_CLOUD_URL)")
 @click.option("--remote", "remote_name", default="origin", help=REMOTE_OPTION_HELP)
+@click.option(
+    "--to",
+    "to_branch",
+    help="Cloud branch to write (default: the same name as --branch); for "
+    "parking a conflicting branch under another name to merge by hand",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite the cloud branch when it is ahead; its previous tip is "
+    "kept locally under refs/memoir/backup/<branch> first",
+)
 @pass_context
 def push(
     ctx: MemoirContext,
@@ -267,12 +279,16 @@ def push(
     create_name: str | None,
     url: str | None,
     remote_name: str,
+    to_branch: str | None,
+    force: bool,
 ):
     """Push a branch and its memory chunks to memoir-cloud.
 
     INPUT: Optional branch name (default: current branch). With
     --create <store>, first create that cloud store under your handle and
-    link it under --remote (default `origin`).
+    link it under --remote (default `origin`). With --to <name>, write the
+    cloud branch under that name; with --force, overwrite a cloud branch
+    that is ahead (its previous tip is parked under refs/memoir/backup/).
     OUTPUT: Address, branch pushed, chunks uploaded / already present.
 
     Uploads the node files the cloud is missing first (multipart batches of
@@ -289,10 +305,12 @@ def push(
       memoir push --create demo       # or name it
       memoir push
       memoir push --branch experiments
+      memoir push --branch main --to main-conflict-20261011-0930   # park it to merge by hand
+      memoir push --branch main --force                           # cloud main := local main
 
     \b
-    JSON output includes: origin, branch, chunks_uploaded, chunks_present, pushed,
-    seconds, chunk_seconds, git_seconds, bytes_sent, compressed
+    JSON output includes: origin, branch, to, forced, backup_ref, chunks_uploaded,
+    chunks_present, pushed, seconds, chunk_seconds, git_seconds, bytes_sent, compressed
     """
     _require_cloud(ctx)
     _require_store(ctx)
@@ -301,10 +319,19 @@ def push(
 
         create_name = ctx.repo.name if ctx.repo else Path(ctx.store_path or ".").name
     result = _run(
-        ctx, lambda: _service(ctx, remote_name).push(branch, create_name, url)
+        ctx,
+        lambda: _service(ctx, remote_name).push(
+            branch, create_name, url, to=to_branch, force=force
+        ),
+    )
+    where = (
+        result.branch
+        if result.to == result.branch
+        else f"{result.branch} as {result.to}"
     )
     ctx.success(
-        f"pushed {result.branch} to {result.address}: "
+        f"pushed {where} to {result.address}"
+        f"{' (forced; previous tip kept at ' + result.backup_ref + ')' if result.backup_ref else ''}: "
         f"{result.chunks_uploaded + result.chunks_present:,} chunks "
         f"({result.chunks_uploaded:,} new{_sent(result)}) in "
         f"{result.chunk_seconds:.1f} s, git in {result.git_seconds:.1f} s",

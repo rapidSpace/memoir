@@ -29,7 +29,7 @@ LLM calls inherit Claude Code's auth automatically (`MEMOIR_LLM_BACKEND=claude-c
 
 | Component | Role |
 |---|---|
-| **Slash commands** | `/memoir:onboard`, `/memoir:remember`, `/memoir:recall`, `/memoir:status`, `/memoir:sync`, `/memoir:ui`, `/memoir:pane`. (Admin operations like taxonomy and forget are available via the `memoir` CLI.) |
+| **Slash commands** | `/memoir:onboard`, `/memoir:remember`, `/memoir:recall`, `/memoir:status`, `/memoir:sync`, `/memoir:ui`, `/memoir:pane`, `/memoir:push`. (Admin operations like taxonomy and forget are available via the `memoir` CLI.) |
 | **Skills** | `memory-recall` (user facts, auto-triggered, runs in a forked context) and `memoir-onboard` (maintains the `codebase:onboard` snapshot). |
 | **Lifecycle hooks** | `SessionStart` (inject status + taxonomy + unmerged-branch suggestions, with a guided `/memoir:sync` offer when there's meaningful unmerged work), `UserPromptSubmit` (surface matching hints), `Stop` (async auto-capture of durable facts), `SessionEnd` (cleanup). |
 | **Status line** | `[memoir] <branch> · N memories`, with warnings for concurrent sessions or sticky-branch mode. On Claude Code 2.1.287+ the mod also appends `memoir: <branch> · N memories · +N this turn` to the hint line under the prompt, with no settings edit. |

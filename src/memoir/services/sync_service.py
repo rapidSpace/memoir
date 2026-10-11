@@ -891,14 +891,14 @@ class SyncService(BaseService):
     # -- chunks ------------------------------------------------------------
 
     def local_chunks(self) -> set[str]:
+        """The node files some commit reaches: what a push sends and what a
+        fetch counts as present. Dead nodes (see ``memoir gc``) stay home."""
+        from memoir.store.node_gc import reachable_nodes
+
         nodes = self._nodes_dir()
         if not nodes.is_dir():
             return set()
-        return {
-            p.name
-            for p in nodes.iterdir()
-            if p.is_file() and CHUNK_HASH_RE.match(p.name)
-        }
+        return reachable_nodes(self.store_path)
 
     # -- pushed record (what the server has confirmed) ----------------------
 
@@ -1041,7 +1041,13 @@ class SyncService(BaseService):
         branch: str | None = None,
         create: str | None = None,
         gateway: str | None = None,
+        to: str | None = None,
+        force: bool = False,
     ) -> PushResult:
+        """Push ``branch`` (default: current) to the cloud as ``to`` (default:
+        the same name). With ``force`` the cloud branch is overwritten; its
+        previous tip is first fetched and parked under
+        ``refs/memoir/backup/<to>`` so nothing is lost."""
         if create is not None:
             self._create_and_link(create, gateway)
         gateway, owner, store_name = self._remote()
@@ -1051,25 +1057,30 @@ class SyncService(BaseService):
                 "this store has no memories yet; nothing to push", code=2
             )
         branch = branch or self._current_branch()
-        if branch.startswith(CLOUD_BRANCH_PREFIX):
-            raise ServiceError(
-                f"'{branch}' is a cloud-owned proposal branch and cannot be pushed"
-            )
+        target = to or branch
+        for name in {branch, target}:
+            if name.startswith(CLOUD_BRANCH_PREFIX):
+                raise ServiceError(
+                    f"'{name}' is a cloud-owned proposal branch and cannot be pushed"
+                )
         if not self._ref_exists(f"refs/heads/{branch}"):
             raise ServiceError(f"branch '{branch}' does not exist locally", code=2)
 
         started = time.monotonic()
         git_seconds = 0.0
+        backup_ref: str | None = None
+        refspec = f"{branch}:{target}"
+        push_args = ["push", *(["--force"] if force else []), self.remote, refspec]
         with self._client(gateway) as client:
             client.handle()
+            if force:
+                backup_ref = self._park_cloud_tip(target)
             uploaded, present = self._upload_chunks(client, address)
             chunk_seconds = time.monotonic() - started
 
             # Only after every chunk is resident on the server.
             t_git = time.monotonic()
-            result = self._git(
-                ["push", self.remote, f"{branch}:{branch}"], auth=True, check=False
-            )
+            result = self._git(push_args, auth=True, check=False)
             git_seconds += time.monotonic() - t_git
             if result.returncode != 0 and "missing chunk" in result.stderr:
                 # The pushed record disagreed with the server (e.g. it was
@@ -1081,9 +1092,7 @@ class SyncService(BaseService):
                 uploaded += more
                 present -= more
                 t_git = time.monotonic()
-                result = self._git(
-                    ["push", self.remote, f"{branch}:{branch}"], auth=True, check=False
-                )
+                result = self._git(push_args, auth=True, check=False)
                 git_seconds += time.monotonic() - t_git
             bytes_sent = client.bytes_sent
             compressed = client.gzip_ok and not client._gzip_refused and bytes_sent > 0
@@ -1101,12 +1110,43 @@ class SyncService(BaseService):
             chunks_uploaded=uploaded,
             chunks_present=present,
             pushed=True,
+            to=target,
+            forced=force,
+            backup_ref=backup_ref,
             seconds=time.monotonic() - started,
             chunk_seconds=chunk_seconds,
             git_seconds=git_seconds,
             bytes_sent=bytes_sent,
             compressed=compressed,
         )
+
+    def _park_cloud_tip(self, target: str) -> str | None:
+        """Before a forced push, keep the cloud's current ``target`` tip under
+        ``refs/memoir/backup/<target>``; None when the cloud has no such
+        branch. Runs with the gateway key bound (inside ``_client``)."""
+        self._git(
+            [
+                "fetch",
+                self.remote,
+                f"+refs/heads/{target}:refs/remotes/{self.remote}/{target}",
+            ],
+            auth=True,
+            check=False,
+        )
+        tip = self._git(
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"refs/remotes/{self.remote}/{target}",
+            ],
+            check=False,
+        )
+        if tip.returncode != 0:
+            return None
+        ref = f"{BACKUP_REF_PREFIX}{target}"
+        self._git(["update-ref", ref, tip.stdout.strip()])
+        return ref
 
     def _create_and_link(self, name: str, gateway: str | None) -> None:
         """``push --create <store>``: validate locally, create, set origin."""
