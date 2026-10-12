@@ -527,6 +527,7 @@ test('memories tab (the default): on a branch only the keys that differ from mai
   expect(await ui.find({ type: 'Button', key: 'mem-metrics.turn.feat/x' })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'all', text: 'all branches (off)' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'merge', text: 'merge to main memory' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'pull', text: 'pull from main memory' })).toBeDefined()
   // Main is read through the CLI's key-level diff: never `get --branch` (the CLI would check main out).
   expect(w.runs.some(argv => argv.includes('diff') && argv.includes('main') && argv.includes('HEAD'))).toBe(true)
   expect(w.runs.some(argv => argv.includes('--branch'))).toBe(false)
@@ -596,6 +597,7 @@ test('memories tab on main lists everything; a key shows its value and can be fo
   expect(await ui.find({ type: 'Text', text: '3 memories on main' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'mem-workflow.coding.gates' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'merge' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'pull' })).toBeUndefined()
   expect(w.runs.some(argv => argv.includes('diff'))).toBe(false)
   expect(w.runs.some(argv => argv.includes('main..HEAD'))).toBe(false)
 
@@ -673,6 +675,43 @@ test('merge with both: ours for the merge, then the branch value is appended on 
   const append = w.runs.find(argv => argv.includes('remember'))!
   expect(append.slice(append.indexOf('remember'))).toEqual([
     'remember', '-p', 'knowledge.decisions.architecture', '-n', 'default', '--merge-policy', 'append', '--', CONTENT['knowledge.decisions.architecture'],
+  ])
+})
+
+test('pull from main: the same chooser the other way round, merging main into the branch with no checkout', async ($, on) => {
+  const { w } = await boot($, on, { head: 'ref: refs/heads/feat/x\n' })
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'pull' })
+  // The key changed on both sides and the one main still holds; the branch's own new key is not main's to give.
+  expect(await ui.find({ type: 'Text', text: /Pull main into feat\/x: 2 keys differ on main/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'pull-ours', text: /keep this branch's value/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'pull-both', text: /append main's/ })).toBeDefined()
+  await ui.press({ key: 'pull-cancel' })
+  expect(await ui.find({ type: 'Button', key: 'pull-ours' })).toBeUndefined()
+  expect(w.runs.some(argv => argv.includes('merge'))).toBe(false)
+
+  await ui.press({ key: 'pull' })
+  await ui.press({ key: 'pull-theirs' })
+  const merge = w.runs.find(argv => argv.includes('merge'))
+  expect(merge!.slice(merge!.indexOf('merge'))).toEqual(['merge', 'main', '-S', 'theirs'])
+  // Into the checked-out branch: nothing to check out and back.
+  expect(w.runs.some(argv => argv.includes('checkout'))).toBe(false)
+  expect(await ui.find({ type: 'Button', key: 'pull-theirs' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'mem-knowledge.technical.build' })).toBeDefined()
+})
+
+test("pull with both: ours for the merge, then main's value is appended on the branch", async ($, on) => {
+  const { w } = await boot($, on, { head: 'ref: refs/heads/feat/x\n' })
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'pull' })
+  await ui.press({ key: 'pull-both' })
+  const verbs = w.runs.map(argv => argv.find(a => ['merge', 'remember', 'checkout'].includes(a))).filter(Boolean)
+  expect(verbs).toEqual(['merge', 'remember'])
+  const merge = w.runs.find(argv => argv.includes('merge'))!
+  expect(merge.slice(merge.indexOf('merge'))).toEqual(['merge', 'main', '-S', 'ours'])
+  const append = w.runs.find(argv => argv.includes('remember'))!
+  expect(append.slice(append.indexOf('remember'))).toEqual([
+    'remember', '-p', 'knowledge.decisions.architecture', '-n', 'default', '--merge-policy', 'append', '--', 'Keep business logic in services/',
   ])
 })
 

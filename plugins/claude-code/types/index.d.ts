@@ -93,15 +93,15 @@ export type MemoirTab = 'memories' | 'recent' | 'metrics'
 
 /**
  * What to do with a key changed on both the branch and main: `ours` and
- * `theirs` are `memoir merge -S`; `both` keeps main's value and appends the
- * branch's to it.
+ * `theirs` are `memoir merge -S`, from the target's point of view; `both`
+ * keeps the target's value and appends the other side's to it.
  */
 export type MemoirMergeStrategy = 'ours' | 'theirs' | 'both'
 
 /** What the Memories detail can do to a key: delete it here, or write main's value back. */
 export type MemoirMemoryAction = 'forget' | 'restore'
 
-/** The Memories tab's merge-to-main flow: closed, picking a strategy, or running. */
+/** The Memories tab's merge-to-main and pull-from-main flows: closed, picking a strategy, or running. */
 export type MemoirMergeState = 'idle' | 'choose' | 'running'
 
 declare module 'claude-code' {
@@ -140,6 +140,8 @@ declare module 'claude-code' {
       armed: MemoirMemoryAction | null
       /** Memories tab: where the merge-to-main flow stands. */
       merge: MemoirMergeState
+      /** Memories tab: where the pull-from-main flow stands. */
+      pull: MemoirMergeState
       /** Recent tab: the sha whose detail is open, or null for the list. */
       commit: string | null
       /** Recent tab: the open commit's changes once read; null while loading. */

@@ -278,23 +278,24 @@ export async function restoreKey(host: Host, store: string, key: string, content
 }
 
 /**
- * Merge `source` into `target` with the CLI's native three-way merge, then
- * check `source` out again: `merge --into` leaves the store on the target.
- * `ours` and `theirs` are the CLI's own strategies; `both` merges with `ours`
- * and, still on the target, appends the branch's value (from `values`) to
- * each key the merge reported as changed on both sides. Resolves to one line
- * for a toast.
+ * Merge `source` into `target` (the checked-out branch when null) with the
+ * CLI's native three-way merge. `ours` and `theirs` are the CLI's own
+ * strategies, from the target's side; `both` merges with `ours` and then
+ * appends the other side's value (from `values`) to each key the merge
+ * reported as changed on both sides. Resolves to one line for a toast, or
+ * the failure.
  */
-export async function mergeInto(
+async function runMerge(
   host: Host,
   store: string,
   source: string,
-  target: string,
+  target: string | null,
   strategy: MemoirMergeStrategy,
   values: ReadonlyMap<string, string | null>,
-): Promise<string> {
+): Promise<{ text: string; failed: string | null }> {
   const native = strategy === 'both' ? 'ours' : strategy
-  const merged = await exec(host, [...cli(host, store), 'merge', source, '--into', target, '-S', native], store, WRITE_TIMEOUT_MS)
+  const into = target === null ? [] : ['--into', target]
+  const merged = await exec(host, [...cli(host, store), 'merge', source, ...into, '-S', native], store, WRITE_TIMEOUT_MS)
   let parsed: { conflicts?: unknown; error?: unknown } = {}
   try {
     parsed = JSON.parse(merged?.stdout ?? '') as typeof parsed
@@ -325,15 +326,50 @@ export async function mergeInto(
     }
   }
 
-  const back = await exec(host, [...cli(host, store), 'checkout', source], store, WRITE_TIMEOUT_MS)
-  const failed = failure(merged, `merge into ${target}`)
-  if (failed) return typeof parsed.error === 'string' ? `merge into ${target} failed: ${parsed.error}` : failed
+  const what = target === null ? `merge of ${source}` : `merge into ${target}`
+  const failed = failure(merged, what)
+  if (failed) return { text: '', failed: typeof parsed.error === 'string' ? `${what} failed: ${parsed.error}` : failed }
   const n = conflicts.length
   const both = `${appended} appended${unappended ? `, ${unappended} not appended` : ''}`
   const resolved = n ? `, ${n} ${n === 1 ? 'key' : 'keys'} changed on both sides: ${strategy === 'both' ? both : strategy}` : ''
-  const text = `merged ${source} into ${target}${resolved}`
+  return { text: `${target === null ? 'pulled' : 'merged'} ${source} into ${target ?? 'this branch'}${resolved}`, failed: null }
+}
+
+/**
+ * Merge `source` into `target`, then check `source` out again: `merge --into`
+ * leaves the store on the target. `values` holds the branch's values, which
+ * `both` appends to main's.
+ */
+export async function mergeInto(
+  host: Host,
+  store: string,
+  source: string,
+  target: string,
+  strategy: MemoirMergeStrategy,
+  values: ReadonlyMap<string, string | null>,
+): Promise<string> {
+  const result = await runMerge(host, store, source, target, strategy, values)
+  const back = await exec(host, [...cli(host, store), 'checkout', source], store, WRITE_TIMEOUT_MS)
+  if (result.failed) return result.failed
   const stuck = failure(back, `checkout ${source}`)
-  return stuck ? `${text}; ${stuck}` : text
+  return stuck ? `${result.text}; ${stuck}` : result.text
+}
+
+/**
+ * Pull `source` (main) into the checked-out branch: the same three-way merge
+ * the other way round, with no checkout, so a capture landing meanwhile stays
+ * on the branch. `values` holds main's values, which `both` appends to the
+ * branch's.
+ */
+export async function pullFrom(
+  host: Host,
+  store: string,
+  source: string,
+  strategy: MemoirMergeStrategy,
+  values: ReadonlyMap<string, string | null>,
+): Promise<string> {
+  const result = await runMerge(host, store, source, null, strategy, values)
+  return result.failed ?? result.text
 }
 
 export type BranchHead = { branch: string; at: number; tip: string }

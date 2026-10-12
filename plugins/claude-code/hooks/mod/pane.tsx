@@ -42,6 +42,7 @@ export type PaneView = {
   /** The detail action pressed once, awaiting `y`; null when none. */
   armed: MemoirMemoryAction | null
   merge: MemoirMergeState
+  pull: MemoirMergeState
   commit: string | null
   commitDetail: MemoirCommitDetail | null
   expanded: readonly string[]
@@ -59,6 +60,9 @@ export type PaneView = {
     openMerge: () => unknown
     cancelMerge: () => unknown
     runMerge: (strategy: MemoirMergeStrategy) => unknown
+    openPull: () => unknown
+    cancelPull: () => unknown
+    runPull: (strategy: MemoirMergeStrategy) => unknown
     toggleGroup: (name: string) => unknown
     refresh: () => unknown
   }
@@ -69,6 +73,12 @@ const STRATEGIES: { strategy: MemoirMergeStrategy; hotkey: string; what: string 
   { strategy: 'ours', hotkey: 'o', what: "keep main's value" },
   { strategy: 'theirs', hotkey: 't', what: "take this branch's value" },
   { strategy: 'both', hotkey: 'b', what: "keep main's value and append this branch's" },
+]
+/** The same choices pulling main into the branch: `ours` is the branch's side then. */
+const PULL_STRATEGIES: { strategy: MemoirMergeStrategy; hotkey: string; what: string }[] = [
+  { strategy: 'ours', hotkey: 'o', what: "keep this branch's value" },
+  { strategy: 'theirs', hotkey: 't', what: "take main's value" },
+  { strategy: 'both', hotkey: 'b', what: "keep this branch's value and append main's" },
 ]
 
 const MARK_COLOR: Record<MemoirMemory['status'], string | undefined> = {
@@ -367,6 +377,30 @@ export function renderPane(view: PaneView): RenderElement {
           {refreshButton}
         </Box>
       )
+    } else if (view.pull === 'running') {
+      body = <Text dimColor>{`Pulling ${base} into ${status.branch}…`}</Text>
+      footer = <Text dimColor>the store stays on this branch</Text>
+    } else if (view.pull === 'choose') {
+      // What main has that this branch does not: new keys, and keys changed or forgotten here.
+      const incoming = differing.filter(m => m.status !== 'added')
+      body = (
+        <Box flexDirection="column">
+          <Text>{`Pull ${base} into ${status.branch}: ${incoming.length === 1 ? '1 key differs' : `${incoming.length} keys differ`} on ${base}.`}</Text>
+          <Text dimColor>Keys changed only on main are applied either way; pick what to do with a key changed on both sides.</Text>
+          <Text> </Text>
+          {PULL_STRATEGIES.map(s => (
+            <Button key={`pull-${s.strategy}`} plain hotkey={s.hotkey} onPress={() => void actions.runPull(s.strategy)}>
+              {`${s.strategy.padEnd(7)}`}
+              <Text dimColor>{s.what}</Text>
+            </Button>
+          ))}
+        </Box>
+      )
+      footer = (
+        <Button key="pull-cancel" plain hotkey="n" dimColor onPress={() => void actions.cancelPull()}>
+          cancel
+        </Button>
+      )
     } else if (view.merge === 'running') {
       body = <Text dimColor>{`Merging ${status.branch} into ${base}…`}</Text>
       footer = <Text dimColor>the store is on main for a moment; it comes back by itself</Text>
@@ -483,6 +517,13 @@ export function renderPane(view: PaneView): RenderElement {
             {base !== null && differing.length > 0 ? (
               <Button key="merge" plain dimColor onPress={() => void actions.openMerge()}>
                 {`merge to ${base} memory`}
+              </Button>
+            ) : (
+              []
+            )}
+            {base !== null && differing.some(m => m.status !== 'added') ? (
+              <Button key="pull" plain dimColor onPress={() => void actions.openPull()}>
+                {`pull from ${base} memory`}
               </Button>
             ) : (
               []

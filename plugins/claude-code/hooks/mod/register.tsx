@@ -57,6 +57,7 @@ const allBranches = atom({ plugin: 'memoir', key: 'allBranches' } as const, fals
 const branchList = atom({ plugin: 'memoir', key: 'branches' } as const, [] as MemoirBranchDiff[])
 const armed = atom({ plugin: 'memoir', key: 'armed' } as const, null as MemoirMemoryAction | null)
 const merge = atom({ plugin: 'memoir', key: 'merge' } as const, 'idle' as MemoirMergeState)
+const pull = atom({ plugin: 'memoir', key: 'pull' } as const, 'idle' as MemoirMergeState)
 const commit = atom({ plugin: 'memoir', key: 'commit' } as const, null as string | null)
 const commitDetail = atom({ plugin: 'memoir', key: 'commitDetail' } as const, null as MemoirCommitDetail | null)
 
@@ -68,6 +69,8 @@ export const register: Register = on => {
   let apply: (m: MemoirMemory, kind: MemoirMemoryAction) => Promise<string> = async () => 'memoir store not ready'
   // Merge the branch into main with one of the CLI's conflict strategies.
   let mergeNow: (strategy: MemoirMergeStrategy) => Promise<string> = async () => 'memoir store not ready'
+  // Pull main into the branch: what main has that the branch does not, the same strategies.
+  let pullNow: (strategy: MemoirMergeStrategy) => Promise<string> = async () => 'memoir store not ready'
   // What one commit changed, for the Recent tab's detail.
   let loadCommit: (sha: string) => Promise<MemoirCommitDetail> = async sha => ({ sha, changes: null })
   let hintSuppressed = false
@@ -253,6 +256,22 @@ export const register: Register = on => {
       }
     }
 
+    pullNow = async strategy => {
+      const current = await read($, status)
+      const base = (await read($, memoryList)).base
+      if (!storePath || !current.branch) return 'memoir store not ready'
+      if (!base) return 'nothing to pull: not on a branch compared with main'
+      // `both` appends main's value to the branch's: the base side of the comparison.
+      const values = new Map((await read($, memoryList)).items.map(m => [m.key, m.base]))
+      merging = true
+      try {
+        return await store.pullFrom(host, storePath, base, strategy, values)
+      } finally {
+        merging = false
+        await refresh(true)
+      }
+    }
+
     void refresh(true)
     $.clock.every(POLL_MS, () => refresh())
     return next(e)
@@ -323,6 +342,7 @@ export const register: Register = on => {
       branches: await read($, branchList),
       armed: await read($, armed),
       merge: await read($, merge),
+      pull: await read($, pull),
       commit: await read($, commit),
       commitDetail: await read($, commitDetail),
       showTaxonomy: await read($, showTaxonomy),
@@ -362,6 +382,14 @@ export const register: Register = on => {
           await update($, merge, () => 'running')
           const text = await mergeNow(strategy)
           await update($, merge, () => 'idle')
+          $.ui.toast(text)
+        },
+        openPull: () => update($, pull, () => 'choose'),
+        cancelPull: () => update($, pull, () => 'idle'),
+        runPull: async strategy => {
+          await update($, pull, () => 'running')
+          const text = await pullNow(strategy)
+          await update($, pull, () => 'idle')
           $.ui.toast(text)
         },
         toggleGroup: name =>
