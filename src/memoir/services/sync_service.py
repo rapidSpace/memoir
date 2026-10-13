@@ -109,15 +109,20 @@ ADDRESS_FORM = "<owner>/<store>, e.g. feng-zhang/demo"
 # --------------------------------------------------------------------------
 
 
-def cloud_enabled() -> bool:
-    """True when some key is available: ``MEMOIR_API_KEY`` or any saved login.
+def cloud_enabled(store_path: str | Path | None = None) -> bool:
+    """True when some key is available: ``MEMOIR_API_KEY``, the store's own
+    agent token (``memoir login --agent``), or any saved login.
 
     Whether one applies to a particular gateway is decided later by
     ``api_key(gateway)``; this only gates the cloud commands as a whole.
     """
-    from memoir.services import cloud_auth
+    from memoir.services import agent_account, cloud_auth
 
-    return bool(_env_key()) or bool(cloud_auth.load_all()["gateways"])
+    return (
+        bool(_env_key())
+        or agent_account.load_token(store_path) is not None
+        or bool(cloud_auth.load_all()["gateways"])
+    )
 
 
 def _env_key() -> str:
@@ -131,21 +136,26 @@ def same_gateway(a: str, b: str) -> bool:
     return normalize_gateway(a) == normalize_gateway(b)
 
 
-def api_key(gateway: str | None = None) -> str:
+def api_key(gateway: str | None = None, store_path: str | Path | None = None) -> str:
     """The key to send to ``gateway``.
 
-    ``MEMOIR_API_KEY`` wins, for any gateway (as it always has). Otherwise
-    the login saved for exactly that gateway (``memoir login --url G``),
-    like ``gh`` scopes tokens per host. A saved key is never sent to any
-    other gateway; with no ``gateway`` there is no saved-key fallback.
+    ``MEMOIR_API_KEY`` wins, for any gateway (as it always has). Then the
+    store's own agent token when it was issued by that gateway (issue
+    #189). Otherwise the login saved for exactly that gateway (``memoir
+    login --url G``), like ``gh`` scopes tokens per host. Neither a saved
+    key nor a store token is ever sent to another gateway; with no
+    ``gateway`` there is no fallback.
     """
     env = _env_key()
     if env:
         return env
     if not gateway:
         return ""
-    from memoir.services import cloud_auth
+    from memoir.services import agent_account, cloud_auth
 
+    local = agent_account.token_for(store_path, gateway)
+    if local:
+        return local
     found = cloud_auth.entry(gateway)
     return str(found["api_key"]) if found else ""
 
@@ -170,15 +180,19 @@ def resolve_gateway(url: str | None = None) -> str:
     return DEFAULT_GATEWAY
 
 
-def redact(text: str, key: str | None = None) -> str:
+def redact(
+    text: str, key: str | None = None, store_path: str | Path | None = None
+) -> str:
     """Strip API keys from anything that may be shown to the user: the given
-    one, or the env key and every saved key when none is given."""
+    one, or the env key, the store's agent token and every saved key when
+    none is given."""
     if key is not None:
         keys = [key]
     else:
-        from memoir.services import cloud_auth
+        from memoir.services import agent_account, cloud_auth
 
-        keys = [_env_key(), *cloud_auth.saved_keys()]
+        local = agent_account.load_token(store_path)
+        keys = [_env_key(), local["api_key"] if local else "", *cloud_auth.saved_keys()]
     for k in keys:
         if k:
             text = text.replace(k, "***")
@@ -191,7 +205,8 @@ class NotLoggedInTo(ServiceError):
     def __init__(self, gateway: str):
         super().__init__(
             f"not logged in to {gateway}: run `memoir login --url {gateway}` "
-            f"(or set {API_KEY_ENV})",
+            f"(or set {API_KEY_ENV}; in a repo with no account, "
+            f"`memoir login --agent --url {gateway}`)",
             code=1,
         )
 
@@ -318,6 +333,21 @@ class BatchTooLarge(CloudError):
 
     def __init__(self) -> None:
         super().__init__("batch too large", status=413)
+
+
+_REJECTED_RE = re.compile(r"\[remote rejected\]\s+\S+\s+->\s+\S+\s+\((.*)\)\s*$")
+
+
+def agent_cap_reasons(stderr: str) -> list[str]:
+    """The per-ref reasons an agent store's caps put in git's push report
+    (``branch limit (5) reached``, ``memory limit (2000) exceeded on this
+    branch``), verbatim; empty when the push failed for another reason."""
+    reasons = []
+    for line in stderr.splitlines():
+        m = _REJECTED_RE.search(line)
+        if m and "limit" in m.group(1):
+            reasons.append(m.group(1).strip())
+    return reasons
 
 
 class NonFastForwardError(ServiceError):
@@ -468,6 +498,12 @@ class CloudClient:
         except CloudError as e:
             if e.status == 409:
                 raise CloudError("store name already exists", status=409) from None
+            if e.status == 403:
+                raise CloudError(
+                    "this key is limited to one store (an agent token) and cannot "
+                    "create another; `memoir claim` moves the store to your account",
+                    status=403,
+                ) from None
             if e.status == 422:
                 raise CloudError(e.message.split(": ", 1)[-1], status=422) from None
             raise
@@ -718,9 +754,12 @@ class SyncService(BaseService):
         return parse_remote_url(result.stdout.strip(), self.remote)
 
     def list_remotes(self) -> list[dict[str, Any]]:
-        """Every cloud remote of this store: name, address, gateway, and
-        whether a key applies to that gateway. Non-cloud remotes (URLs that
-        aren't ``<gateway>/<owner>/<store>``) are skipped."""
+        """Every cloud remote of this store: name, address, gateway, whether
+        a key applies to that gateway, and whether that key is the store's
+        agent token. Non-cloud remotes (URLs that aren't
+        ``<gateway>/<owner>/<store>``) are skipped."""
+        from memoir.services import agent_account
+
         result = self._git(
             ["config", "--get-regexp", r"^remote\..*\.url$"], check=False
         )
@@ -737,7 +776,14 @@ class SyncService(BaseService):
                     "name": name,
                     "address": format_address(owner, store),
                     "gateway": gateway,
-                    "logged_in": bool(api_key(gateway)),
+                    "logged_in": bool(api_key(gateway, self.store_path)),
+                    # True while the store sits on an agent account: its own
+                    # token applies and no `memoir claim` has moved it yet.
+                    "agent_store": not _env_key()
+                    and bool(agent_account.token_for(self.store_path, gateway))
+                    and not (agent_account.load_token(self.store_path) or {}).get(
+                        "claimed"
+                    ),
                 }
             )
         rows.sort(key=lambda r: (r["name"] != REMOTE_NAME, r["name"]))
@@ -746,7 +792,7 @@ class SyncService(BaseService):
     def _client(self, gateway: str) -> CloudClient:
         """A client for ``gateway`` carrying the key that applies to it (see
         ``api_key``); also sets the key the authenticated git calls use."""
-        self._key = api_key(gateway)
+        self._key = api_key(gateway, self.store_path)
         if not self._key:
             raise NotLoggedInTo(gateway)
         return CloudClient(gateway, self._key)
@@ -1102,6 +1148,13 @@ class SyncService(BaseService):
                 raise NonFastForwardError(
                     "remote has commits you don't have; run `memoir pull` first"
                 )
+            capped = agent_cap_reasons(stderr)
+            if capped:
+                raise ServiceError(
+                    f"{address} refused {target}: {'; '.join(capped)} — an agent "
+                    "store's cap; `memoir claim` moves the store to your account "
+                    "and lifts it"
+                )
             raise GitOperationError(f"git push failed: {stderr.strip()}")
         self._report_repo_meta(gateway, owner, store_name)
         return PushResult(
@@ -1119,6 +1172,128 @@ class SyncService(BaseService):
             bytes_sent=bytes_sent,
             compressed=compressed,
         )
+
+    # -- agent accounts (issue #189) ----------------------------------------
+
+    def agent_token(self) -> dict[str, Any] | None:
+        """The store-local token (``{"gateway", "api_key", "handle"}``), if any."""
+        from memoir.services import agent_account
+
+        return agent_account.load_token(self.store_path)
+
+    def login_agent(self, gateway: str | None, name: str) -> dict[str, Any]:
+        """``memoir login --agent``: provision an agent account owning one
+        store named ``name`` (the repo's), keep its token with the store,
+        link ``origin``.
+        Refused when a login already applies to the gateway (plain ``memoir
+        login`` is the way then) or the store already has a remote."""
+        from memoir.services import agent_account, cloud_auth, repo_meta
+
+        gateway = resolve_gateway(gateway)
+        error = validate_store_name(name)
+        if error:
+            raise ServiceError(f'"{name}" is not a valid store name: {error}')
+        existing = self.remote_address()
+        if existing:
+            raise ServiceError(
+                f"remote '{self.remote}' already links this store to {existing}; "
+                "an agent account is for a store with no cloud link yet"
+            )
+        if self.agent_token():
+            raise ServiceError(
+                "this store already holds an agent token; `memoir push` works "
+                "as is, and `memoir claim` moves the store to your account"
+            )
+        if _env_key() or cloud_auth.entry(gateway):
+            raise ServiceError(
+                f"you are already logged in to {gateway}; run `memoir login` "
+                "(or `memoir push --create`) instead of --agent"
+            )
+        doc = repo_meta.collect(self.store_path)
+        answer = agent_account.start(
+            gateway,
+            client=agent_account.client_name(name),
+            store_name=name,
+            repo=doc,
+        )
+        handle, store_name = str(answer["handle"]), str(answer.get("store") or name)
+        agent_account.save_token(
+            self.store_path,
+            str(answer.get("gateway") or gateway),
+            answer["api_key"],
+            handle,
+        )
+        self._set_remote(remote_url(gateway, handle, store_name), force=False)
+        if doc is not None:
+            repo_meta.record_sent(self.store_path, self.remote, doc)
+        return {
+            "handle": handle,
+            "address": format_address(handle, store_name),
+            "gateway": gateway,
+            "limits": answer.get("limits") or {},
+            "idle_days": answer.get("idle_days"),
+            "key_expires_at": answer.get("key_expires_at"),
+        }
+
+    def claim(self, human_key: str, name: str | None = None) -> dict[str, Any]:
+        """``memoir claim``: move this store's agent account into the human's
+        (``human_key``). The token stays, rebound to the human and scoped to
+        the store, so pushes keep working; ``origin`` moves to the new address.
+        Raises ``StoreNameTaken`` when the human already owns a store of that
+        name (retry with ``name``)."""
+        from memoir.services import agent_account, repo_meta
+
+        token = self.agent_token()
+        if token is None:
+            raise ServiceError(
+                "this store holds no agent token; `memoir claim` is for a store "
+                "set up with `memoir login --agent`"
+            )
+        gateway = token["gateway"]
+        answer = agent_account.claim(
+            gateway, human_key=human_key, agent_token=token["api_key"], name=name
+        )
+        handle, store_name = str(answer["handle"]), str(answer["store"])
+        warning: str | None = None
+        local = repo_meta.collect(self.store_path, online=False)
+        local_url = local.get("url") if local else None
+        cloud_url = answer.get("repo_url")
+        if cloud_url and local_url and cloud_url != local_url:
+            warning = (
+                f"the cloud store was provisioned for {cloud_url}; this repo's "
+                f"origin is {local_url}"
+            )
+        self._set_remote(remote_url(gateway, handle, store_name), force=True)
+        agent_account.save_token(
+            self.store_path, gateway, token["api_key"], handle, claimed=True
+        )
+        return {
+            "address": format_address(handle, store_name),
+            "handle": handle,
+            "store": store_name,
+            "store_id": answer.get("store_id"),
+            "repo_url": cloud_url,
+            "gateway": gateway,
+            "warning": warning,
+        }
+
+    def agent_session(self) -> dict[str, Any]:
+        """``memoir cloud open``: a single-use link that signs a browser in as
+        the agent (``{"url", "expires_in"}``)."""
+        from memoir.services import agent_account
+
+        token = self.agent_token()
+        if token is None:
+            raise ServiceError(
+                "this store holds no agent token; open the store at "
+                f"{self.remote_address() or 'the cloud'} after `memoir login`"
+            )
+        if token["claimed"]:
+            raise ServiceError(
+                "this store was claimed into your account; sign in at "
+                f"{token['gateway']}/login instead"
+            )
+        return agent_account.session_url(token["gateway"], agent_token=token["api_key"])
 
     def _park_cloud_tip(self, target: str) -> str | None:
         """Before a forced push, keep the cloud's current ``target`` tip under

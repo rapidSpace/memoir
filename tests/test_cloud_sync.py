@@ -175,6 +175,8 @@ class TestGating:
             "push",
             "pull",
             "fetch",
+            "claim",
+            "cloud",
         }
         assert "MEMOIR_API_KEY" in data["env_vars"]
         assert "MEMOIR_CLOUD_URL" in data["env_vars"]

@@ -2,7 +2,8 @@
 """
 Cloud sync commands for memoir CLI.
 
-Commands: login, logout, remote (add/show/remove), push, pull, fetch
+Commands: login, logout, remote (add/show/remove), push, pull, fetch,
+claim, cloud open
 
 Cloud stores are addressed GitHub-style as ``<owner>/<store>``. The cloud
 commands need a key: ``memoir login`` saves one (``MEMOIR_API_KEY`` still
@@ -26,7 +27,7 @@ from memoir.cli.main import EXIT_NO_STORE, MemoirContext, pass_context
 def _require_cloud(ctx: MemoirContext) -> None:
     from memoir.services.sync_service import PRO_REQUIRED_MESSAGE, cloud_enabled
 
-    if not cloud_enabled():
+    if not cloud_enabled(ctx.store_path):
         ctx.error(PRO_REQUIRED_MESSAGE, 1)
 
 
@@ -72,7 +73,7 @@ def _run(ctx: MemoirContext, op: Callable[[], Any]) -> Any:
     try:
         return op()
     except ServiceError as e:
-        ctx.error(redact(e.message), e.code)
+        ctx.error(redact(e.message, store_path=ctx.store_path), e.code)
 
 
 def _service(ctx: MemoirContext, remote: str = "origin"):
@@ -495,6 +496,17 @@ def pull(
 @click.option(
     "--status", is_flag=True, help="List the saved logins (gateway, handle, default)"
 )
+@click.option(
+    "--agent",
+    is_flag=True,
+    help="No account on this machine: provision an agent account owning one "
+    "cloud store for this repo, and keep its token with the store",
+)
+@click.option(
+    "--name",
+    "store_name",
+    help="With --agent: the cloud store's name (default: the repo's directory name)",
+)
 @pass_context
 def login(
     ctx: MemoirContext,
@@ -503,11 +515,21 @@ def login(
     no_browser: bool,
     make_default: bool,
     status: bool,
+    agent: bool,
+    store_name: str | None,
 ):
     """Log in to a memoir-cloud gateway and save a key for it on this machine.
 
     INPUT: Optional gateway (--url); with --with-key, an API key on stdin.
     OUTPUT: The gateway and handle you're logged in as (never the key).
+
+    --agent, run inside a repo, is for an agent on a machine with no login:
+    the cloud provisions a throwaway account that owns exactly one store
+    named after the repo, and the token is kept with this repo's memoir
+    store (.git/memoir-cloud/token, 0600), never in cloud.json, so other
+    repos never pick it up. The store is capped (branches, memories per
+    branch) and deleted after a month idle; `memoir claim` moves it into
+    your real account, which lifts both.
 
     Starts a device approval like `gh auth login`: memoir prints a link and
     a short code, opens the browser, and waits while you click Authorize on
@@ -528,7 +550,8 @@ def login(
 
     \b
     JSON output includes: gateway, handle, default, config
-    (--status: default, gateways[{gateway, handle, default}])
+    (--status: default, gateways[{gateway, handle, default}];
+    --agent: handle, address, gateway, limits{branches, keys}, idle_days)
     """
     import os
     import sys
@@ -539,6 +562,12 @@ def login(
         CloudClient,
         redact,
     )
+
+    if agent:
+        _login_agent(ctx, url, store_name)
+        return
+    if store_name:
+        ctx.error("--name only applies with --agent", 2)
 
     if status:
         saved = cloud_auth.load_all()
@@ -576,29 +605,7 @@ def login(
         except ServiceError as e:
             ctx.error(redact(e.message, key), 1)
     else:
-
-        def show(start: dict) -> None:
-            link = start.get("verification_url_complete") or start.get(
-                "verification_url"
-            )
-            click.echo(
-                f"Open {start.get('verification_url')} and enter {start.get('user_code')}"
-                f"\n  (or go straight to {link})",
-                err=ctx.json_output,
-            )
-            if not no_browser and link:
-                import contextlib
-                import webbrowser
-
-                with contextlib.suppress(Exception):  # a missing browser is fine
-                    webbrowser.open(link)
-            click.echo("Waiting for approval in the browser…", err=ctx.json_output)
-
-        try:
-            got = cloud_auth.device_login(gateway, on_code=show)
-        except cloud_auth.LoginError as e:
-            ctx.error(str(e), 1)
-        key, handle, gateway = got["api_key"], got.get("handle"), got["gateway"]
+        key, handle, gateway = _device_login(ctx, gateway, no_browser)
 
     path = cloud_auth.save(gateway, key, handle, make_default=make_default)
     gateway = cloud_auth.normalize_gateway(gateway)
@@ -630,6 +637,175 @@ def _default_gateway() -> str:
     from memoir.services.sync_service import DEFAULT_GATEWAY
 
     return cloud_auth.default_gateway() or DEFAULT_GATEWAY
+
+
+def _device_login(
+    ctx: MemoirContext, gateway: str, no_browser: bool
+) -> tuple[str, str | None, str]:
+    """Run the browser approval and return ``(key, handle, gateway)``; the
+    caller saves it."""
+    from memoir.services import cloud_auth
+
+    def show(start: dict) -> None:
+        link = start.get("verification_url_complete") or start.get("verification_url")
+        click.echo(
+            f"Open {start.get('verification_url')} and enter {start.get('user_code')}"
+            f"\n  (or go straight to {link})",
+            err=ctx.json_output,
+        )
+        if not no_browser and link:
+            import contextlib
+            import webbrowser
+
+            with contextlib.suppress(Exception):  # a missing browser is fine
+                webbrowser.open(link)
+        click.echo("Waiting for approval in the browser…", err=ctx.json_output)
+
+    try:
+        got = cloud_auth.device_login(gateway, on_code=show)
+    except cloud_auth.LoginError as e:
+        ctx.error(str(e), 1)
+    return got["api_key"], got.get("handle"), got["gateway"]
+
+
+def _login_agent(ctx: MemoirContext, url: str | None, store_name: str | None) -> None:
+    """``memoir login --agent``: see ``SyncService.login_agent``."""
+    from pathlib import Path
+
+    _require_store(ctx, create=True)
+    name = store_name or (ctx.repo.name if ctx.repo is not None else Path.cwd().name)
+    svc = _service(ctx)
+    got = _run(ctx, lambda: svc.login_agent(url, name))
+    limits = got.get("limits") or {}
+    caps = ", ".join(
+        s
+        for s in (
+            f"{limits['branches']} branches" if limits.get("branches") else "",
+            f"{limits['keys']:,} memories per branch" if limits.get("keys") else "",
+        )
+        if s
+    )
+    idle = got.get("idle_days")
+    ctx.success(
+        f"agent account {got['handle']} owns {got['address']} on {got['gateway']}"
+        + (f"; capped at {caps}" if caps else "")
+        + (f"; deleted after {idle} idle days" if idle else "")
+        + "\n  `memoir push` works from here; `memoir claim` moves the store to "
+        "your own account and lifts the caps",
+        got,
+    )
+
+
+@click.command()
+@click.option(
+    "--name",
+    "new_name",
+    help="Store name under your account when the repo's name is taken there",
+)
+@click.option(
+    "--no-browser", is_flag=True, help="Print the approval link without opening it"
+)
+@pass_context
+def claim(ctx: MemoirContext, new_name: str | None, no_browser: bool):
+    """Move this repo's agent-account store into your own memoir-cloud account.
+
+    INPUT: A store set up with `memoir login --agent` (its token proves the
+    claim); your own login for the gateway, started here when missing.
+    OUTPUT: The store's new address; origin is rewritten to it.
+
+    The token stays with the store, now scoped to the claimed store under
+    your account, so `memoir push` keeps working without another login.
+    The agent store's caps and idle expiry are lifted.
+
+    \b
+    Examples:
+      memoir claim
+      memoir claim --name memoir-agent   # when you already have a store of that name
+
+    \b
+    JSON output includes: address, handle, store, store_id, repo_url, warning
+    """
+    import os
+    import sys
+
+    from memoir.services import agent_account, cloud_auth
+
+    _require_store(ctx)
+    svc = _service(ctx)
+    token = svc.agent_token()
+    if token is None:
+        ctx.error(
+            "this store holds no agent token; `memoir claim` is for a store set up "
+            "with `memoir login --agent`",
+            1,
+        )
+    gateway = token["gateway"]
+    human_key = os.environ.get("MEMOIR_API_KEY", "").strip()
+    if not human_key:
+        saved = cloud_auth.entry(gateway)
+        human_key = str(saved["api_key"]) if saved else ""
+    if not human_key:
+        ctx.info(f"no login for {gateway} yet; approve this machine first")
+        key, handle, gateway = _device_login(ctx, gateway, no_browser)
+        cloud_auth.save(gateway, key, handle)
+        human_key = key
+
+    name = new_name
+    while True:
+        try:
+            got = svc.claim(human_key, name)
+            break
+        except agent_account.StoreNameTaken as e:
+            if ctx.json_output or not sys.stdin.isatty():
+                ctx.error(f"{e.message}; rerun with --name <other name>", 1)
+            click.echo(e.message)
+            name = click.prompt("Store name under your account").strip()
+        except agent_account.AgentError as e:
+            ctx.error(e.message, e.code)
+    if got.get("warning"):
+        ctx.warn(got["warning"])
+    ctx.success(
+        f"claimed: {got['address']} on {got['gateway']} is yours now; origin updated "
+        "and the store's token keeps working",
+        got,
+    )
+
+
+@click.group()
+def cloud():
+    """memoir-cloud helpers that need no login of your own."""
+
+
+@cloud.command("open")
+@click.option("--no-browser", is_flag=True, help="Print the link without opening it")
+@pass_context
+def cloud_open(ctx: MemoirContext, no_browser: bool):
+    """Open this repo's agent-account store in the memoir-cloud web UI.
+
+    INPUT: A store set up with `memoir login --agent`.
+    OUTPUT: A single-use sign-in link (valid 5 minutes), opened in the browser.
+
+    An agent account has no password or sign-in provider, so this link is
+    its only way into the UI. The API key itself never appears in a URL.
+    After `memoir claim`, sign in normally instead.
+
+    \b
+    JSON output includes: url, expires_in
+    """
+    _require_store(ctx)
+    svc = _service(ctx)
+    got = _run(ctx, svc.agent_session)
+    link = str(got["url"])
+    if not no_browser:
+        import contextlib
+        import webbrowser
+
+        with contextlib.suppress(Exception):  # a missing browser is fine
+            webbrowser.open(link)
+    ctx.success(
+        f"open {link}\n  (single use, valid {int(got.get('expires_in') or 300) // 60} min)",
+        {"url": link, "expires_in": got.get("expires_in")},
+    )
 
 
 @click.command()

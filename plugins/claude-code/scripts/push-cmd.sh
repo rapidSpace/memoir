@@ -10,6 +10,9 @@
 #                          in the background; prints the link and code
 #   login-wait [secs]    — wait until the gateway has a saved login (default 240 s)
 #   login-key            — read an API key from stdin and save it (`login --with-key`)
+#   login-agent          — no account on this machine: provision an agent
+#                          account owning one cloud store for this repo
+#                          (`memoir login --agent`); the token stays with the store
 #   link                 — link origin to <handle>/<repo name>: an existing cloud
 #                          store, else create it (`push --create`)
 #   push <branch>        — `memoir push --branch`; exit 6 is reported as a conflict
@@ -216,6 +219,21 @@ PY
     done
     printf '{"logged_in": false, "error": "no approval within %s s"}\n' "$secs"
     exit 1
+    ;;
+
+  login-agent)
+    gateway=$(gateway_for)
+    # memoir_json runs inside the store directory: name the cloud store
+    # after the repo explicitly, as `link` does for `push --create`.
+    args=(login --agent --name "$(repo_name)")
+    [ -n "$gateway" ] && args+=(--url "$gateway")
+    if out=$(memoir_json "${args[@]}"); then
+      printf '%s\n' "$out"
+    else
+      msg=$(json_get "$out" "d.get('error') or ''")
+      printf '{"logged_in": false, "error": %s}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1] or "the agent account could not be created"))' "$msg")"
+      exit 1
+    fi
     ;;
 
   login-key)

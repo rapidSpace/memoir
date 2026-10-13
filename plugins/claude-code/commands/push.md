@@ -19,7 +19,12 @@ Every call below is `bash "${CLAUDE_PLUGIN_ROOT}/scripts/push-cmd.sh" <subcomman
 
 ## Step 1 — Log in if needed
 
-If `logged_in` is false:
+If `logged_in` is false and `remote` is null, first ask with AskUserQuestion (header "Memoir cloud") how to proceed. This question is where the user's permission for an agent account is captured; never create one without it:
+
+- `Create an agent account for this repo (Recommended)` — "No login is needed. The cloud provisions a throwaway account that owns one store for this repo; the token stays with this repo's memoir store. The store is capped (5 branches, 2,000 memories per branch) and deleted after 30 idle days; `memoir claim` later moves it into your own account." On yes, run `login-agent`. On `logged_in` false in its answer, report its `error` and fall through to the browser login below. Otherwise report `agent account <handle> owns <address> (capped at <limits.branches> branches, <limits.keys> memories per branch; deleted after <idle_days> idle days — `memoir claim` moves it to your account)`, treat the store as linked, and go to Step 3.
+- `Sign in with my own account` — the browser login below.
+
+Browser login (also when `logged_in` is false but `remote` is set):
 
 1. Run `login-start`. If `started` is true, tell the user: "Open <link> and enter <code> to approve this machine", then run `login-wait 240` (one Bash call; it returns as soon as the approval lands).
 2. If `started` is false, or `login-wait` reports `logged_in: false`: ask with AskUserQuestion (header "Memoir login") whether to paste an API key. On yes, ask for the key (they may paste it as the Other text), then run `login-key` with the key on stdin: `printf '%s' '<key>' | bash … login-key`. Never repeat the key back.
@@ -38,7 +43,7 @@ For each entry in `branches` (main first, then newest commit first), run `push <
 - `pushed: true` → `✓ <name> → <origin>` (add `N chunks, M new` from `chunks_uploaded` / `chunks_present` on the first line only; later pushes reuse them).
 - `conflict: true` and `--force` was NOT given → run `push-conflict <name>`; report `↷ <name> parked as <to> (cloud is ahead; merge by hand)`.
 - `conflict: true` and `--force` WAS given → run `push-force <name>`; report `! <name> overwritten (previous cloud tip kept at <backup_ref>)`.
-- `pushed: false` otherwise → report `✗ <name>: <error>` and continue with the next branch.
+- `pushed: false` otherwise → report `✗ <name>: <error>` and continue with the next branch. An error naming a `branch limit` or `memory limit` is an agent store's cap: show it verbatim and add that `memoir claim` lifts it.
 
 ## Step 4 — Summary
 

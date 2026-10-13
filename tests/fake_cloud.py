@@ -15,6 +15,13 @@ with GitHub-style ``<owner>/<store>`` addressing:
   ``POST .../git-upload-pack`` — delegated to the real ``git http-backend``
   CGI over a bare repo, so the git half of push/fetch/pull is exercised with
   the real ``git`` binary and no network.
+- ``POST /auth/agent/start`` (no auth; 201 with ``AGENT_KEY`` owning one
+  store under ``AGENT_HANDLE``; 404 with ``agent_accounts=False``, 429 with
+  ``agent_rate_limited``), ``POST /auth/agent/claim`` (the human's key moves
+  the store to them; 409 ``store_name_taken``; 400 bad token; 403 agent
+  caller), ``POST /auth/agent/session`` (a one-time link; 403 once claimed).
+  The agent key resolves only its own store; ``POST /stores`` with it is 403
+  ``key_scoped``.
 
 Every request is recorded (method, path, headers, body) so tests can assert
 on ordering (chunk PUTs before receive-pack), batching, and that the bearer
@@ -47,6 +54,9 @@ if TYPE_CHECKING:
 
 API_KEY = "mck_test_secret_key_DO_NOT_LEAK"
 HANDLE = "feng-zhang"
+# Agent accounts (issue #189): what `POST /auth/agent/start` hands out.
+AGENT_KEY = "mck_agent_token_DO_NOT_LEAK"
+AGENT_HANDLE = "agent-k7x2m9"
 OTHER_HANDLE = "someone-else"
 
 _STORE_NAME_RE = re.compile(r"^(?!\.)[A-Za-z0-9._-]{1,100}$")
@@ -96,6 +106,16 @@ class FakeCloudState:
     login_polls: int = 0
     login_starts: list[dict] = field(default_factory=list)
     revoked_keys: list[str] = field(default_factory=list)
+    # Agent accounts: `agent_accounts=False` is a gateway with the feature
+    # off (404); `agent_rate_limited` answers 429; `agent_starts` records
+    # the bodies; `agent_claimed` flips once a human claimed the store (the
+    # same token then acts as the human's, scoped to that store).
+    agent_accounts: bool = True
+    agent_rate_limited: bool = False
+    agent_starts: list[dict] = field(default_factory=list)
+    agent_store_id: str | None = None
+    agent_claimed: bool = False
+    agent_sessions: int = 0
     patch_status: int | None = None
     batches_ok: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -124,24 +144,43 @@ class FakeCloudState:
         self.chunks.setdefault(store_id, {})
         return store
 
-    def lookup(self, owner: str, name: str) -> dict | None:
-        """Owner-scoped, case-insensitive resolution (None if not yours)."""
+    def lookup(self, owner: str, name: str, viewer: str | None = None) -> dict | None:
+        """Owner-scoped, case-insensitive resolution (None if not the
+        viewer's; the viewer is the human by default)."""
+        viewer = viewer or self.handle
         for s in self.stores.values():
             if (
                 s["owner_handle"].lower() == owner.lower()
                 and s["name"].lower() == name.lower()
-                and s["owner_handle"] == self.handle
+                and s["owner_handle"] == viewer
             ):
                 return s
         return None
 
-    def repo_for(self, owner: str, name: str) -> Path:
-        store = self.lookup(owner, name)
+    def known_key(self, key: str | None) -> bool:
+        return key == self.api_key or (
+            key == AGENT_KEY and self.agent_store_id is not None
+        )
+
+    def viewer_for(self, key: str | None) -> str | None:
+        """Whose handle a bearer key acts under: the human's (None until they
+        chose one), the agent's (until the store is claimed, when the token
+        becomes the human's), or nobody's."""
+        if key == self.api_key:
+            return self.handle
+        if key == AGENT_KEY and self.agent_store_id is not None:
+            return self.handle if self.agent_claimed else AGENT_HANDLE
+        return None
+
+    def repo_for(self, owner: str, name: str, viewer: str | None = None) -> Path:
+        store = self.lookup(owner, name, viewer)
         assert store is not None
         return self.repos_root / store["id"]
 
-    def chunks_for(self, owner: str, name: str) -> dict[str, bytes]:
-        store = self.lookup(owner, name)
+    def chunks_for(
+        self, owner: str, name: str, viewer: str | None = None
+    ) -> dict[str, bytes]:
+        store = self.lookup(owner, name, viewer)
         assert store is not None
         return self.chunks[store["id"]]
 
@@ -176,8 +215,18 @@ class _Handler(BaseHTTPRequestHandler):
     def _json(self, status: int, obj) -> None:
         self._send(status, json.dumps(obj).encode())
 
+    def _bearer(self) -> str | None:
+        auth = self.headers.get("Authorization", "")
+        return auth[len("Bearer ") :] if auth.startswith("Bearer ") else None
+
     def _authed(self) -> bool:
-        return self.headers.get("Authorization") == f"Bearer {self.state.api_key}"
+        return self.state.known_key(self._bearer())
+
+    def _viewer(self) -> str | None:
+        return self.state.viewer_for(self._bearer())
+
+    def _is_agent(self) -> bool:
+        return self._bearer() == AGENT_KEY and not self.state.agent_claimed
 
     def _record(self, body: bytes) -> None:
         with self.state.lock:
@@ -243,8 +292,38 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._json(200, {"status": self.state.login_outcome})
             return
+        if path == "/auth/agent/start" and self.command == "POST":
+            self._agent_start(body)
+            return
         if not self._authed():
             self._json(401, {"detail": "invalid or missing API key"})
+            return
+        if path == "/auth/agent/claim" and self.command == "POST":
+            self._agent_claim(body)
+            return
+        if path == "/auth/agent/session" and self.command == "POST":
+            if not self.state.agent_accounts:
+                self._json(404, {"detail": "Not Found"})
+                return
+            if not self._is_agent():
+                self._json(
+                    403,
+                    {
+                        "detail": "only an agent token opens the UI this way; sign in at /login instead"
+                    },
+                )
+                return
+            with self.state.lock:
+                self.state.agent_sessions += 1
+                n = self.state.agent_sessions
+            base = f"http://{self.headers.get('Host')}"
+            self._json(
+                200,
+                {
+                    "url": f"{base}/auth/agent/open?id=code{n}&token=once{n}",
+                    "expires_in": 300,
+                },
+            )
             return
         if path == "/auth/keys/self/revoke" and self.command == "POST":
             with self.state.lock:
@@ -261,12 +340,27 @@ class _Handler(BaseHTTPRequestHandler):
                     "scopes": ["read", "write"],
                     "expires_at": None,
                     "tier": "PRO",
-                    "handle": self.state.handle,
+                    "handle": self._viewer(),
                 },
             )
             return
 
         if path == "/stores":
+            if self._bearer() == AGENT_KEY:
+                # A token scoped to one store: it can neither create another
+                # nor see beyond its own.
+                if self.command == "POST":
+                    self._json(403, {"error": "key_scoped"})
+                else:
+                    self._json(
+                        200,
+                        [
+                            s
+                            for s in self.state.stores.values()
+                            if s["id"] == self.state.agent_store_id
+                        ],
+                    )
+                return
             if self.command == "POST":
                 name = json.loads(body or b"{}").get("name", "")
                 if (
@@ -308,7 +402,11 @@ class _Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/stores/by-name/"):
             segs = path[len("/stores/by-name/") :].split("/")
-            store = self.state.lookup(*segs) if len(segs) == 2 else None
+            store = (
+                self.state.lookup(*segs, viewer=self._viewer())
+                if len(segs) == 2
+                else None
+            )
             if store is None:
                 self._json(404, {"detail": "store not found"})
                 return
@@ -334,7 +432,7 @@ class _Handler(BaseHTTPRequestHandler):
         segs = path.strip("/").split("/", 2)
         if len(segs) == 3:
             owner, name, tail = segs
-            if self.state.lookup(owner, name) is None:
+            if self.state.lookup(owner, name, viewer=self._viewer()) is None:
                 self._json(404, {"detail": "store not found"})
                 return
             if tail.startswith("chunks"):
@@ -347,11 +445,114 @@ class _Handler(BaseHTTPRequestHandler):
 
         self._json(404, {"detail": "not found"})
 
+    # ---- agent accounts (issue #189) -----------------------------------
+    def _agent_start(self, body: bytes) -> None:
+        if not self.state.agent_accounts:
+            self._json(404, {"detail": "Not Found"})
+            return
+        if self.state.agent_rate_limited:
+            self._json(
+                429,
+                {
+                    "detail": "Too many agent accounts were created from this address today."
+                },
+            )
+            return
+        req = json.loads(body or b"{}")
+        name = str(req.get("store_name", ""))
+        if (
+            not _STORE_NAME_RE.match(name)
+            or name.lower().endswith(".git")
+            or name in (".", "..")
+            or not req.get("client_name")
+        ):
+            self._json(
+                422,
+                {
+                    "detail": [
+                        {
+                            "type": "value_error",
+                            "loc": ["body", "store_name"],
+                            "msg": f"Value error, {_STORE_NAME_RULES}",
+                        }
+                    ]
+                },
+            )
+            return
+        with self.state.lock:
+            self.state.agent_starts.append(req)
+            store = self.state.create_store(name, AGENT_HANDLE)
+            store["repo"] = req.get("repo")
+            self.state.agent_store_id = store["id"]
+            self.state.agent_claimed = False
+        self._json(
+            201,
+            {
+                "api_key": AGENT_KEY,
+                "handle": AGENT_HANDLE,
+                "store": name,
+                "address": f"{AGENT_HANDLE}/{name}",
+                "gateway": f"http://{self.headers.get('Host')}",
+                "limits": {"branches": 5, "keys": 2000},
+                "idle_days": 30,
+                "key_expires_at": "2027-10-12T00:00:00+00:00",
+            },
+        )
+
+    def _agent_claim(self, body: bytes) -> None:
+        if not self.state.agent_accounts:
+            self._json(404, {"detail": "Not Found"})
+            return
+        if self._is_agent():
+            self._json(403, {"detail": "sign in with a regular account to claim"})
+            return
+        req = json.loads(body or b"{}")
+        store = self.state.stores.get(self.state.agent_store_id or "")
+        if (
+            req.get("agent_token") != AGENT_KEY
+            or store is None
+            or self.state.agent_claimed
+        ):
+            self._json(400, {"detail": "that is not a live agent token"})
+            return
+        name = req.get("name") or store["name"]
+        taken = any(
+            s["owner_handle"] == self.state.handle and s["name"].lower() == name.lower()
+            for s in self.state.stores.values()
+        )
+        if taken:
+            self._json(
+                409,
+                {
+                    "detail": {
+                        "error": "store_name_taken",
+                        "message": f"you already have a store named {name!r}; pass another name",
+                    }
+                },
+            )
+            return
+        with self.state.lock:
+            store["name"] = name
+            store["owner_handle"] = self.state.handle
+            store["owner_user_id"] = f"usr_{self.state.handle}"
+            self.state.agent_claimed = True
+        repo = store.get("repo") or {}
+        self._json(
+            200,
+            {
+                "address": f"{self.state.handle}/{name}",
+                "handle": self.state.handle,
+                "store": name,
+                "store_id": store["id"],
+                "repo_url": repo.get("url") if isinstance(repo, dict) else None,
+            },
+        )
+
     # ---- chunk protocol ------------------------------------------------
     def _chunks(
         self, owner: str, name: str, tail: str, query: dict, body: bytes
     ) -> None:
-        store_chunks = self.state.chunks_for(owner, name)
+        store_chunks = self.state.chunks_for(owner, name, self._viewer())
         if tail == "chunks/negotiate" and self.command == "POST":
             req = json.loads(body or b"{}")
             have = req.get("have", [])
@@ -481,7 +682,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _git_cgi(
         self, owner: str, name: str, tail: str, query: str, body: bytes
     ) -> None:
-        repo = self.state.repo_for(owner, name)
+        repo = self.state.repo_for(owner, name, self._viewer())
         env = {
             **os.environ,
             "GIT_PROJECT_ROOT": str(repo.parent),

@@ -33,9 +33,22 @@ memoir logout --all
 
 `--default` makes a login's gateway the default for new links. A file written by an older memoir (one login) is read as a single entry and rewritten in the new shape on the next login.
 
+### Agent accounts (`memoir login --agent`)
+
+An agent working in a repo on a machine with no saved login has another way in. `memoir login --agent`, run inside the repo, asks the cloud for an **agent account**: a throwaway account that owns exactly one store, named after the repo, provisioned over HTTP with no human in the loop. The cloud returns a token once; memoir keeps it **with the store**, under `<store>/.git/memoir-cloud/token` (mode 0600), never in `cloud.json`, so no other repo on the machine picks it up. `origin` is linked to the new store and `memoir push` works from there.
+
+```bash
+memoir login --agent            # inside the repo: agent-k7x2m9 owns agent-k7x2m9/<repo name>
+memoir push
+memoir cloud open               # a single-use link into the web UI (the account has no password)
+memoir claim                    # later, as yourself: the store moves into your account
+```
+
+The cloud cannot verify that a human agreed to this, so it rate-limits creation per address, caps an agent store at **5 branches and 2,000 memories per branch** (a push beyond that is refused with ``branch limit (5) reached`` or ``memory limit (2000) exceeded on this branch``), and deletes an agent account idle for **30 days**. `memoir claim` lifts all three: it logs you in (the normal browser approval) when the machine has no login yet, moves the store into your account (`--name <other>` when you already own a store of that name), rewrites `origin` to the new address, and keeps the token, which now belongs to you and is still scoped to that one store, so pushes continue without another login. It warns, without failing, when the cloud store was provisioned for a different repo URL than this clone's `origin`. The token can create no other store (`memoir push --create` is refused with it). The Claude Code plugin's `/memoir:push` offers an agent account when the machine has no login; claiming is a `memoir claim` in a terminal, as yourself.
+
 | What | Resolution |
 |---|---|
-| key for a request to gateway G | `MEMOIR_API_KEY` (wins for every gateway) → the login saved for G → none: the command stops before any request with ``not logged in to G: run `memoir login --url G` `` |
+| key for a request to gateway G | `MEMOIR_API_KEY` (wins for every gateway) → the store's own agent token, when G issued it → the login saved for G → none: the command stops before any request with ``not logged in to G: run `memoir login --url G` `` |
 | gateway for a new link (`push --create`, `remote add`) | `--url` → `MEMOIR_CLOUD_URL` → the saved default (only while `MEMOIR_API_KEY` is unset) → production |
 
 A saved key is only ever sent to the gateway that issued it. Gateways are compared as scheme + host[:port], case-insensitively. Once a store is linked, its remote's URL decides the gateway, and therefore the key.
@@ -93,6 +106,7 @@ Node filenames are prollytree node hashes and are treated as opaque identifiers;
 | `memoir fetch` | `git fetch` all branches, tags, and `refs/cloud/*`; download every chunk not present locally. Moves no local branch. |
 | `memoir pull [<owner>/<store>] [--remote <name>] [--url <gateway>] [--branch <b>] [--force]` | With an address, links the remote first when it doesn't exist yet (as `remote add` would; in a code repo the store is created too), so `memoir pull <owner>/<store>` is the one-command way to start from an existing cloud store. If the remote already points at that address it just pulls; if it points at a different store or gateway, nothing changes and the command exits 1 (pull never relinks silently). Then `fetch`, then fast-forward the branch. A branch that does not exist locally is created from the cloud; a pristine local store (only prollytree's initial commit, no memories) adopts the cloud history. `--force` replaces the local branch with the cloud copy, discarding local memories on it; the previous tip is kept under `refs/memoir/backup/<branch>` and printed. |
 | `memoir status` | Shows `origin: <owner>/<store>` when a cloud remote is configured. |
+| `memoir login --agent` / `memoir claim [--name <store>]` / `memoir cloud open` | Agent accounts: provision one for this repo (no login needed), move its store into your account, open it in the web UI. See [Agent accounts](#agent-accounts-memoir-login---agent). |
 
 All commands support `--json`; the JSON carries the address as `origin`, never an id.
 
@@ -116,7 +130,7 @@ When the store is the memory store of a code repo (the Claude Code plugin's `~/.
 
 ## Key handling
 
-- The API key comes from `MEMOIR_API_KEY` or, when that is unset, from the login file `~/.config/memoir/cloud.json` (mode 0600; see [Logging in](#logging-in)). It is never written to `.git/config`, to the store, or anywhere else, and never printed.
+- The API key comes from `MEMOIR_API_KEY` or, when that is unset, from the store's agent token (`<store>/.git/memoir-cloud/token`, mode 0600; see [Agent accounts](#agent-accounts-memoir-login---agent)) or the login file `~/.config/memoir/cloud.json` (mode 0600; see [Logging in](#logging-in)). It is never written to `.git/config` or anywhere else, and never printed.
 - Git gets it per invocation as `-c http.extraHeader="Authorization: Bearer <key>"`; git runs with `GIT_TERMINAL_PROMPT=0` so an invalid key fails fast instead of prompting.
 - The key is redacted from any error output that echoes a command.
 - A 401 from the gateway is reported as ``not signed in: run `memoir login` (or set MEMOIR_API_KEY)``.
@@ -125,7 +139,7 @@ When the store is the memory store of a code repo (the Claude Code plugin's `~/.
 
 | Variable | Effect |
 |---|---|
-| `MEMOIR_API_KEY` | API key; overrides the one saved by `memoir login`. |
+| `MEMOIR_API_KEY` | API key; overrides the one saved by `memoir login` and a store's agent token. |
 | `MEMOIR_CLOUD_URL` | Gateway URL used by `login`, `remote add` and `push --create` when `--url` is not passed; overrides the gateway saved by `memoir login`. Default: the production gateway. After linking, the gateway is read back from the `origin` URL. |
 
 ## Exit codes

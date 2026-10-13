@@ -295,6 +295,9 @@ Cloud stores are addressed GitHub-style as `<owner>/<store>`, where `owner` is y
 | Command | What it does |
 |---|---|
 | `memoir login [--url <gateway>] [--with-key] [--default] [--status]` / `memoir logout [--url <gateway>] [--all]` | Save a key per gateway after approving in the browser (or from stdin); list them; remove one (or all) and revoke it on the cloud. |
+| `memoir login --agent [--name <store>]` | No account on this machine: provision an agent account that owns one cloud store for this repo and keep its token with the store (`.git/memoir-cloud/token`), then link `origin`. Capped (5 branches, 2,000 memories per branch) and deleted after 30 idle days until claimed. |
+| `memoir claim [--name <store>]` | Move that agent store into your own account (logs you in first when needed); `origin` follows, the token keeps working, the caps are lifted. `--name` when you already own a store of the repo's name. |
+| `memoir cloud open` | A single-use link (5 minutes) that opens the agent store in the web UI, the account's only way in. |
 | `memoir push --create [<store>]` | Create `<your handle>/<store>` in the cloud (default name: the code repo's), link it as `origin`, and push. The usual first step. |
 | `memoir remote add [<owner>/<store>] [--url <gateway>] [--force]` | Link an existing cloud store. With no argument, proposes `<your handle>/<directory name>` and asks first. |
 | `memoir remote add … --name <remote>` / `memoir remote list` | Link another cloud store under its own name (e.g. `staging`); list every remote with its gateway and login state. |
@@ -503,7 +506,8 @@ To use a different gateway, such as a staging deployment, pass `--url` to `remot
 |---|---|---|
 | `Cloud sync requires a login` | No saved login and no `MEMOIR_API_KEY`. | `memoir login` (or `export MEMOIR_API_KEY=...`) |
 | `not signed in: run memoir login` | The gateway returned 401. | The key is wrong, expired or revoked: `memoir login` again. |
-| `not logged in to <gateway>` | No saved login for the gateway this remote (or `--url`) points at. | `memoir login --url <gateway>`; `memoir login --status` shows what's saved. |
+| `not logged in to <gateway>` | No saved login for the gateway this remote (or `--url`) points at. | `memoir login --url <gateway>`; `memoir login --status` shows what's saved. In a repo with no account at all, `memoir login --agent`. |
+| `<address> refused <branch>: branch limit (5) reached` / `memory limit (2000) exceeded on this branch` | The store belongs to an agent account, which the cloud caps. | `memoir claim` moves it to your account and lifts the caps. |
 | `your account has no handle yet` | You have not chosen a handle. | Open `<gateway>/app` in a browser and pick one. |
 | `store <owner>/<store> not found (or you don't own it)` | Unknown address, or a store belonging to someone else. | Check the address with `memoir remote show` on the machine that created it. |
 | `"str_..." is a store id` | You pasted an internal id. | Use the `<owner>/<store>` address instead. |

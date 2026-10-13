@@ -188,7 +188,16 @@ def get_cli_schema(group: click.Group) -> dict[str, Any]:
         "crypto": ["proof", "verify", "blame"],
         "analysis": ["summarize"],
         "taxonomy": ["taxonomy"],
-        "cloud": ["login", "logout", "remote", "push", "pull", "fetch"],
+        "cloud": [
+            "login",
+            "logout",
+            "remote",
+            "push",
+            "pull",
+            "fetch",
+            "claim",
+            "cloud",
+        ],
         "utility": ["ui", "tui"],
     }
 
@@ -377,6 +386,7 @@ def cli(
                            the litellm backend; unset = provider default
       MEMOIR_API_KEY       memoir-cloud API key; overrides the one saved by
                            `memoir login` (~/.config/memoir/cloud.json, 0600)
+                           and a store's own agent token (`memoir login --agent`)
       MEMOIR_CLOUD_URL     memoir-cloud gateway URL (default: the one from
                            `memoir login`, else production)
 
@@ -498,6 +508,8 @@ cli.add_command(sync.remote)
 cli.add_command(sync.push)
 cli.add_command(sync.pull)
 cli.add_command(sync.fetch)
+cli.add_command(sync.claim)
+cli.add_command(sync.cloud)
 
 # Utility commands
 cli.add_command(ui.ui)
