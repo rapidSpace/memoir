@@ -1198,6 +1198,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Logging in">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#agent-accounts-memoir-login-agent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Agent accounts (memoir login --agent)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2005,6 +2022,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Logging in">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#agent-accounts-memoir-login-agent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Agent accounts (memoir login --agent)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2174,6 +2208,14 @@
 </span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>memoir<span class="w"> </span><span class="nb">logout</span><span class="w"> </span>--all
 </span></code></pre></div>
 <p><code>--default</code> makes a login's gateway the default for new links. A file written by an older memoir (one login) is read as a single entry and rewritten in the new shape on the next login.</p>
+<h3 id="agent-accounts-memoir-login-agent">Agent accounts (<code>memoir login --agent</code>)<a class="headerlink" href="#agent-accounts-memoir-login-agent" title="Permanent link">&para;</a></h3>
+<p>An agent working in a repo on a machine with no saved login has another way in. <code>memoir login --agent</code>, run inside the repo, asks the cloud for an <strong>agent account</strong>: a throwaway account that owns exactly one store, named after the repo, provisioned over HTTP with no human in the loop. The cloud returns a token once; memoir keeps it <strong>with the store</strong>, under <code>&lt;store&gt;/.git/memoir-cloud/token</code> (mode 0600), never in <code>cloud.json</code>, so no other repo on the machine picks it up. <code>origin</code> is linked to the new store and <code>memoir push</code> works from there.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>memoir<span class="w"> </span>login<span class="w"> </span>--agent<span class="w">            </span><span class="c1"># inside the repo: agent-k7x2m9 owns agent-k7x2m9/&lt;repo name&gt;</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>memoir<span class="w"> </span>push
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>memoir<span class="w"> </span>cloud<span class="w"> </span>open<span class="w">               </span><span class="c1"># a single-use link into the web UI (the account has no password)</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>memoir<span class="w"> </span>claim<span class="w">                    </span><span class="c1"># later, as yourself: the store moves into your account</span>
+</span></code></pre></div>
+<p>The cloud cannot verify that a human agreed to this, so it rate-limits creation per address, caps an agent store at <strong>5 branches and 2,000 memories per branch</strong> (a push beyond that is refused with <code>branch limit (5) reached</code> or <code>memory limit (2000) exceeded on this branch</code>), and deletes an agent account idle for <strong>30 days</strong>. <code>memoir claim</code> lifts all three: it logs you in (the normal browser approval) when the machine has no login yet, moves the store into your account (<code>--name &lt;other&gt;</code> when you already own a store of that name), rewrites <code>origin</code> to the new address, and keeps the token, which now belongs to you and is still scoped to that one store, so pushes continue without another login. It warns, without failing, when the cloud store was provisioned for a different repo URL than this clone's <code>origin</code>. The token can create no other store (<code>memoir push --create</code> is refused with it). The Claude Code plugin's <code>/memoir:push</code> offers an agent account when the machine has no login; claiming is a <code>memoir claim</code> in a terminal, as yourself.</p>
 <table>
 <thead>
 <tr>
@@ -2184,7 +2226,7 @@
 <tbody>
 <tr>
 <td>key for a request to gateway G</td>
-<td><code>MEMOIR_API_KEY</code> (wins for every gateway) → the login saved for G → none: the command stops before any request with <code>not logged in to G: run `memoir login --url G`</code></td>
+<td><code>MEMOIR_API_KEY</code> (wins for every gateway) → the store's own agent token, when G issued it → the login saved for G → none: the command stops before any request with <code>not logged in to G: run `memoir login --url G`</code></td>
 </tr>
 <tr>
 <td>gateway for a new link (<code>push --create</code>, <code>remote add</code>)</td>
@@ -2195,12 +2237,12 @@
 <p>A saved key is only ever sent to the gateway that issued it. Gateways are compared as scheme + host[:port], case-insensitively. Once a store is linked, its remote's URL decides the gateway, and therefore the key.</p>
 <h2 id="remotes">Remotes<a class="headerlink" href="#remotes" title="Permanent link">&para;</a></h2>
 <p>A store can link to several cloud stores, like <code>git remote</code>. The default remote is <code>origin</code>; add more with <code>--name</code> and pick one with <code>--remote</code>:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>memoir<span class="w"> </span>remote<span class="w"> </span>add<span class="w"> </span>zhangfengcdt/demo<span class="w"> </span>--name<span class="w"> </span>staging<span class="w"> </span>--url<span class="w"> </span>https://api-gateway-staging-3ce9.up.railway.app
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>memoir<span class="w"> </span>remote<span class="w"> </span>list<span class="w">                 </span><span class="c1"># name, address, gateway, logged in?</span>
-</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>memoir<span class="w"> </span>push<span class="w">                        </span><span class="c1"># to origin, with origin's gateway key</span>
-</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>memoir<span class="w"> </span>push<span class="w"> </span>--remote<span class="w"> </span>staging<span class="w">       </span><span class="c1"># to staging, with staging's key</span>
-</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>memoir<span class="w"> </span>pull<span class="w"> </span>--remote<span class="w"> </span>staging
-</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>memoir<span class="w"> </span>remote<span class="w"> </span>remove<span class="w"> </span>staging
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>memoir<span class="w"> </span>remote<span class="w"> </span>add<span class="w"> </span>zhangfengcdt/demo<span class="w"> </span>--name<span class="w"> </span>staging<span class="w"> </span>--url<span class="w"> </span>https://api-gateway-staging-3ce9.up.railway.app
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>memoir<span class="w"> </span>remote<span class="w"> </span>list<span class="w">                 </span><span class="c1"># name, address, gateway, logged in?</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>memoir<span class="w"> </span>push<span class="w">                        </span><span class="c1"># to origin, with origin's gateway key</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>memoir<span class="w"> </span>push<span class="w"> </span>--remote<span class="w"> </span>staging<span class="w">       </span><span class="c1"># to staging, with staging's key</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>memoir<span class="w"> </span>pull<span class="w"> </span>--remote<span class="w"> </span>staging
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>memoir<span class="w"> </span>remote<span class="w"> </span>remove<span class="w"> </span>staging
 </span></code></pre></div>
 <p>Each remote keeps its own state: branches under <code>refs/remotes/&lt;remote&gt;/…</code> (proposal branches under <code>&lt;remote&gt;/cloud/…</code>), the pushed record <code>.git/memoir-cloud/pushed-&lt;remote&gt;</code>, and the repo-metadata record <code>repo-meta-&lt;remote&gt;</code>. <code>memoir status</code> lists every remote as <code>&lt;name&gt;: &lt;owner&gt;/&lt;store&gt; @ &lt;gateway&gt;</code>.</p>
 <h2 id="store-resolution">Store resolution<a class="headerlink" href="#store-resolution" title="Permanent link">&para;</a></h2>
@@ -2284,6 +2326,10 @@
 <td><code>memoir status</code></td>
 <td>Shows <code>origin: &lt;owner&gt;/&lt;store&gt;</code> when a cloud remote is configured.</td>
 </tr>
+<tr>
+<td><code>memoir login --agent</code> / <code>memoir claim [--name &lt;store&gt;]</code> / <code>memoir cloud open</code></td>
+<td>Agent accounts: provision one for this repo (no login needed), move its store into your account, open it in the web UI. See <a href="#agent-accounts-memoir-login---agent">Agent accounts</a>.</td>
+</tr>
 </tbody>
 </table>
 <p>All commands support <code>--json</code>; the JSON carries the address as <code>origin</code>, never an id.</p>
@@ -2301,7 +2347,7 @@
 </ul>
 <h2 id="key-handling">Key handling<a class="headerlink" href="#key-handling" title="Permanent link">&para;</a></h2>
 <ul>
-<li>The API key comes from <code>MEMOIR_API_KEY</code> or, when that is unset, from the login file <code>~/.config/memoir/cloud.json</code> (mode 0600; see <a href="#logging-in">Logging in</a>). It is never written to <code>.git/config</code>, to the store, or anywhere else, and never printed.</li>
+<li>The API key comes from <code>MEMOIR_API_KEY</code> or, when that is unset, from the store's agent token (<code>&lt;store&gt;/.git/memoir-cloud/token</code>, mode 0600; see <a href="#agent-accounts-memoir-login---agent">Agent accounts</a>) or the login file <code>~/.config/memoir/cloud.json</code> (mode 0600; see <a href="#logging-in">Logging in</a>). It is never written to <code>.git/config</code> or anywhere else, and never printed.</li>
 <li>Git gets it per invocation as <code>-c http.extraHeader="Authorization: Bearer &lt;key&gt;"</code>; git runs with <code>GIT_TERMINAL_PROMPT=0</code> so an invalid key fails fast instead of prompting.</li>
 <li>The key is redacted from any error output that echoes a command.</li>
 <li>A 401 from the gateway is reported as <code>not signed in: run `memoir login` (or set MEMOIR_API_KEY)</code>.</li>
@@ -2317,7 +2363,7 @@
 <tbody>
 <tr>
 <td><code>MEMOIR_API_KEY</code></td>
-<td>API key; overrides the one saved by <code>memoir login</code>.</td>
+<td>API key; overrides the one saved by <code>memoir login</code> and a store's agent token.</td>
 </tr>
 <tr>
 <td><code>MEMOIR_CLOUD_URL</code></td>

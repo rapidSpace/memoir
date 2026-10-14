@@ -2747,6 +2747,18 @@ to v0.1.7 you had to add the <code>[litellm]</code> extra explicitly.)</p>
 <td>Save a key per gateway after approving in the browser (or from stdin); list them; remove one (or all) and revoke it on the cloud.</td>
 </tr>
 <tr>
+<td><code>memoir login --agent [--name &lt;store&gt;]</code></td>
+<td>No account on this machine: provision an agent account that owns one cloud store for this repo and keep its token with the store (<code>.git/memoir-cloud/token</code>), then link <code>origin</code>. Capped (5 branches, 2,000 memories per branch) and deleted after 30 idle days until claimed.</td>
+</tr>
+<tr>
+<td><code>memoir claim [--name &lt;store&gt;]</code></td>
+<td>Move that agent store into your own account (logs you in first when needed); <code>origin</code> follows, the token keeps working, the caps are lifted. <code>--name</code> when you already own a store of the repo's name.</td>
+</tr>
+<tr>
+<td><code>memoir cloud open</code></td>
+<td>A single-use link (5 minutes) that opens the agent store in the web UI, the account's only way in.</td>
+</tr>
+<tr>
 <td><code>memoir push --create [&lt;store&gt;]</code></td>
 <td>Create <code>&lt;your handle&gt;/&lt;store&gt;</code> in the cloud (default name: the code repo's), link it as <code>origin</code>, and push. The usual first step.</td>
 </tr>
@@ -2917,7 +2929,12 @@ to v0.1.7 you had to add the <code>[litellm]</code> extra explicitly.)</p>
 <tr>
 <td><code>not logged in to &lt;gateway&gt;</code></td>
 <td>No saved login for the gateway this remote (or <code>--url</code>) points at.</td>
-<td><code>memoir login --url &lt;gateway&gt;</code>; <code>memoir login --status</code> shows what's saved.</td>
+<td><code>memoir login --url &lt;gateway&gt;</code>; <code>memoir login --status</code> shows what's saved. In a repo with no account at all, <code>memoir login --agent</code>.</td>
+</tr>
+<tr>
+<td><code>&lt;address&gt; refused &lt;branch&gt;: branch limit (5) reached</code> / <code>memory limit (2000) exceeded on this branch</code></td>
+<td>The store belongs to an agent account, which the cloud caps.</td>
+<td><code>memoir claim</code> moves it to your account and lifts the caps.</td>
 </tr>
 <tr>
 <td><code>your account has no handle yet</code></td>
