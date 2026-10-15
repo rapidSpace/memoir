@@ -6,6 +6,7 @@ Tests branch operations: list, create, checkout, merge, commits, diff.
 
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -543,6 +544,263 @@ class TestBranchServiceBranchesStatus:
         assert main["is_current"] is True
         assert main["ahead"] == 0
         assert main["behind"] == 0
+
+
+class TestBatchBranchDivergence:
+    """Batched ahead/behind: one ``for-each-ref`` instead of one ``git
+    rev-list`` per branch.
+
+    ``get_branches_status`` used to fork ``git rev-list --count --left-right``
+    once per branch, so a branch-panel refresh cost O(branches) subprocesses.
+    These tests pin three things: the batched numbers match the per-branch
+    ones exactly, the fast path really is taken, and a git too old for
+    ``%(ahead-behind:)`` still yields the same numbers via the fallback.
+    """
+
+    @pytest.fixture
+    def service_diverged(self, temp_dir):
+        """A store with three branches: diverged both ways, behind, and equal."""
+        store_service = StoreService(temp_dir)
+        store_service.create_store(temp_dir)
+
+        service = BranchService(temp_dir)
+        store = service._get_store()
+
+        store.put(("default",), "a", {"v": 1})
+        store.commit("main c1")
+
+        # "diverged" gets a commit of its own …
+        service.create_branch("diverged")
+        service.checkout("diverged")
+        store.put(("default",), "b", {"v": 1})
+        store.commit("diverged c1")
+
+        # … while main advances past it, so "diverged" is ahead *and* behind.
+        # "behind" is forked from main's tip, so it starts equal and falls
+        # behind once main gets its second commit.
+        service.create_branch("behind", from_ref="main")
+        service.checkout("main")
+        store.put(("default",), "c", {"v": 1})
+        store.commit("main c2")
+
+        return service
+
+    @staticmethod
+    def _per_branch(service, base):
+        """The reference implementation: one get_divergence() per branch."""
+        out = {}
+        for name in service.list_branches().branches:
+            div = service.get_divergence(name, base=base)
+            out[name] = (div["ahead"], div["behind"])
+        return out
+
+    def _fail_batch_git(self, service, monkeypatch):
+        """Make the ahead-behind for-each-ref fail, as git < 2.41 does
+        ('fatal: unknown field name'), while leaving every other git call
+        working.
+
+        Returns the list of intercepted calls. It is appended to *after* the
+        fake result is built, so a non-empty list also proves the fake ran to
+        completion — the caller's ``except Exception`` would otherwise swallow
+        a broken fake and the test would pass for the wrong reason.
+        """
+        original = service._run_git_command
+        intercepted: list[list[str]] = []
+
+        def fake(args, **kwargs):
+            if "for-each-ref" in args and any("ahead-behind" in a for a in args):
+                failed = subprocess.CompletedProcess(
+                    args=args,
+                    returncode=128,
+                    stdout="",
+                    stderr="fatal: unknown field name: ahead-behind:main",
+                )
+                intercepted.append(list(args))
+                return failed
+            return original(args, **kwargs)
+
+        monkeypatch.setattr(service, "_run_git_command", fake)
+        return intercepted
+
+    def test_batch_matches_per_branch_divergence(self, service_diverged):
+        """Every branch's (ahead, behind) is identical to the per-branch path."""
+        expected = self._per_branch(service_diverged, "main")
+        batched = service_diverged._batch_branch_divergence("main")
+
+        assert batched is not None
+        assert batched == expected
+        # Guard the fixture itself: the three branches must actually differ,
+        # otherwise the equivalence above would be vacuous. Exact counts are
+        # not asserted — store.commit() may produce more than one git commit.
+        assert batched["diverged"][0] > 0, batched  # ahead
+        assert batched["diverged"][1] > 0, batched  # behind
+        assert batched["behind"][0] == 0, batched
+        assert batched["behind"][1] > 0, batched
+        assert batched["main"] == (0, 0), batched
+
+    def test_batch_includes_the_base_branch_as_zero(self, service_diverged):
+        """The base compares to itself: (0, 0) in the batch, not a missing key."""
+        batched = service_diverged._batch_branch_divergence("main")
+        assert batched["main"] == (0, 0)
+
+    def test_returned_shape_is_ahead_then_behind(self, service_diverged):
+        """%(ahead-behind:) prints '<ahead> <behind>'; don't transpose it.
+
+        A branch that is only behind must read (0, N) — swapping the two
+        numbers would still pass a symmetric equivalence test, so assert the
+        asymmetry directly. Exact counts aren't asserted because
+        store.commit() may produce more than one git commit.
+        """
+        batched = service_diverged._batch_branch_divergence("main")
+        ahead, behind = batched["behind"]
+        assert ahead == 0, batched
+        assert behind > 0, batched
+
+    def test_batch_returns_none_when_field_unsupported(
+        self, service_diverged, monkeypatch
+    ):
+        """git < 2.41 rejects the field name → None, so callers can fall back."""
+        intercepted = self._fail_batch_git(service_diverged, monkeypatch)
+        assert service_diverged._batch_branch_divergence("main") is None
+        # The None must come from the returncode check, not from an exception
+        # swallowed by the method's own ``except`` — the fake only records once
+        # it has built its result without raising.
+        assert len(intercepted) == 1, intercepted
+
+    def test_batch_returns_none_on_unparseable_output(
+        self, service_diverged, monkeypatch
+    ):
+        """Garbage from git must not yield a half-filled dict."""
+        monkeypatch.setattr(
+            service_diverged,
+            "_run_git_command",
+            lambda *a, **k: subprocess.CompletedProcess(
+                args=a, returncode=0, stdout="main|not-two-numbers\n", stderr=""
+            ),
+        )
+        assert service_diverged._batch_branch_divergence("main") is None
+
+    def test_batch_returns_none_when_base_ref_missing(self, service_diverged):
+        """A base that isn't a real ref makes git exit non-zero
+        ('fatal: failed to find …'), so the batch reports "unavailable"
+        rather than claiming every branch is level with a ref that isn't there.
+        """
+        assert service_diverged._batch_branch_divergence("no-such-branch") is None
+
+    def test_status_survives_a_missing_base(self, service_diverged, monkeypatch):
+        """Rows still come back when the default branch can't be resolved —
+        the per-branch fallback reports zeros, exactly as it did before."""
+        monkeypatch.setattr(
+            service_diverged, "get_default_branch", lambda: "no-such-branch"
+        )
+        status = service_diverged.get_branches_status()
+        assert "main" in [b["name"] for b in status["branches"]]
+        assert all(b["ahead"] == 0 and b["behind"] == 0 for b in status["branches"])
+
+    def test_status_matches_per_branch_reference(self, service_diverged):
+        """The public surface reports exactly what the per-branch path would."""
+        status = service_diverged.get_branches_status()
+        expected = self._per_branch(service_diverged, status["default"])
+        got = {b["name"]: (b["ahead"], b["behind"]) for b in status["branches"]}
+        assert got == expected
+
+    def test_batching_avoids_per_branch_rev_list(self, service_diverged, monkeypatch):
+        """Pin the optimisation: with batching available, get_divergence —
+        and therefore its ``git rev-list`` fork — is never called."""
+        calls = []
+        original = service_diverged.get_divergence
+
+        def counting(branch, base=None):
+            calls.append(branch)
+            return original(branch, base=base)
+
+        monkeypatch.setattr(service_diverged, "get_divergence", counting)
+        service_diverged.get_branches_status()
+        assert calls == []
+
+    def test_status_falls_back_to_per_branch_when_batch_unavailable(
+        self, service_diverged, monkeypatch
+    ):
+        """With the batched field unavailable the numbers are unchanged, and
+        the per-branch path is what produced them."""
+        expected = self._per_branch(service_diverged, "main")
+
+        intercepted = self._fail_batch_git(service_diverged, monkeypatch)
+        used = []
+        original = service_diverged.get_divergence
+
+        def counting(branch, base=None):
+            used.append(branch)
+            return original(branch, base=base)
+
+        monkeypatch.setattr(service_diverged, "get_divergence", counting)
+
+        status = service_diverged.get_branches_status()
+        got = {b["name"]: (b["ahead"], b["behind"]) for b in status["branches"]}
+        assert got == expected
+        # Every branch went through the fallback, not just the ones missing
+        # from a partial batch.
+        assert sorted(used) == sorted(expected)
+        assert intercepted, "the batch call never reached the git stub"
+
+    def test_tag_shadowing_a_branch_name_keeps_the_bare_name(self, service_diverged):
+        """A tag sharing a branch name makes %(refname:short) print
+        "heads/<name>", so that branch misses the dict and silently loses both
+        its counts and its last-commit date. %(refname:lstrip=2) keeps the bare
+        name under refs/heads/.
+        """
+        subprocess.run(
+            ["git", "tag", "diverged"],
+            cwd=service_diverged.store_path,
+            check=True,
+            capture_output=True,
+        )
+        # Regression: these keys read "heads/diverged" before the fix.
+        assert "diverged" in (service_diverged._batch_branch_divergence("main") or {})
+        assert "diverged" in service_diverged._batch_branch_tips()
+
+        row = next(
+            b
+            for b in service_diverged.get_branches_status()["branches"]
+            if b["name"] == "diverged"
+        )
+        assert row["ahead"] > 0, row  # dropped to 0 by the fallback
+        assert row["last_commit_date"] is not None, row
+
+    def test_branch_name_with_pipe_is_split_from_the_right(
+        self, service_diverged, monkeypatch
+    ):
+        """A branch named "x|y" prints "x|y|0 0". Splitting on the first "|"
+        yields int("y|0"), which fails the whole batch. Git permits "|" in ref
+        names, but Windows cannot create such a ref, so stub git's output.
+        """
+        monkeypatch.setattr(
+            service_diverged,
+            "_run_git_command",
+            lambda *a, **k: subprocess.CompletedProcess(
+                args=a, returncode=0, stdout="x|y|1 2\nmain|0 0\n", stderr=""
+            ),
+        )
+        assert service_diverged._batch_branch_divergence("main") == {
+            "x|y": (1, 2),
+            "main": (0, 0),
+        }
+
+    def test_branch_name_with_pipe_keeps_its_timestamp(
+        self, service_diverged, monkeypatch
+    ):
+        """_batch_branch_tips splits on "|" too — the name must survive it."""
+        monkeypatch.setattr(
+            service_diverged,
+            "_run_git_command",
+            lambda *a, **k: subprocess.CompletedProcess(
+                args=a,
+                returncode=0,
+                stdout="x|y|2026-01-01 00:00:00 +0000|1767225600\n",
+                stderr="",
+            ),
+        )
+        assert service_diverged._batch_branch_tips()["x|y"]["unix"] == 1767225600
 
 
 class TestBranchServiceSyncBranch:
