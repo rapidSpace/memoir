@@ -6,6 +6,7 @@ Tests branch operations: list, create, checkout, merge, commits, diff.
 
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -172,6 +173,52 @@ class TestBranchServiceCommits:
         for commit in commits:
             assert hasattr(commit, "hash") or hasattr(commit, "short_hash")
             assert hasattr(commit, "message")
+
+    def test_get_commits_non_ascii_author_under_non_utf8_locale(
+        self, tmp_path, monkeypatch
+    ):
+        """A non-ASCII author name must survive a non-UTF-8 locale.
+
+        Regression: ``_run_git_command`` used ``text=True`` without an explicit
+        encoding, so subprocess decoded git's UTF-8 output with the *locale*
+        encoding — GBK/cp936 on Chinese Windows, for example. Decoding
+        UTF-8 bytes as GBK corrupts a non-ASCII author name, and because a GBK
+        double-byte character consumes the byte that follows it, the corruption
+        swallowed the ``"|"`` separators ``get_commits`` splits on. Every column
+        then shifted, so ``int(parts[5])`` received a parent commit hash and the
+        whole commit-history API raised.
+
+        The locale is pinned to ``gbk`` here so the bug reproduces on any
+        platform (including UTF-8 CI), not just on affected Windows machines.
+        """
+        repo = tmp_path / "store"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=呆瓜得本命",
+                "-c",
+                "user.email=author@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "测试提交",
+            ],
+            cwd=repo,
+            check=True,
+        )
+
+        monkeypatch.setattr("locale.getencoding", lambda: "gbk")
+
+        commits = BranchService(str(repo)).get_commits()
+
+        assert len(commits) == 1
+        assert commits[0].author == "呆瓜得本命"
+        assert commits[0].email == "author@example.com"
+        assert commits[0].message == "测试提交"
 
 
 class TestBranchServiceMerge:

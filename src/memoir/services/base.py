@@ -107,11 +107,15 @@ class BaseService:
         cmd = ["git", *args]
         logger.debug(f"Running git command: {' '.join(cmd)}")
 
+        # Decode as UTF-8, not the OS locale encoding (`text=True` alone uses
+        # the latter — GBK/cp936 on Chinese Windows — which corrupts non-ASCII
+        # author names). Git emits UTF-8 in practice but doesn't guarantee it.
         result = subprocess.run(
             cmd,
             cwd=self.store_path,
             capture_output=capture_output,
             text=True,
+            encoding="utf-8",
             check=check,
         )
 
