@@ -809,10 +809,12 @@ class BranchService(BaseService):
         per format — replaces 2N subprocesses with 1.
         """
         try:
+            # lstrip=2 keeps the bare name (%(refname:short) prints "heads/<name>"
+            # when a tag shares it), and rsplit survives "|" inside a name.
             result = self._run_git_command(
                 [
                     "for-each-ref",
-                    "--format=%(refname:short)|%(committerdate:iso8601)|%(committerdate:unix)",
+                    "--format=%(refname:lstrip=2)|%(committerdate:iso8601)|%(committerdate:unix)",
                     "refs/heads/",
                 ],
                 check=False,
@@ -824,7 +826,7 @@ class BranchService(BaseService):
                 line = line.strip()
                 if not line:
                     continue
-                parts = line.split("|", 2)
+                parts = line.rsplit("|", 2)
                 if len(parts) < 3:
                     continue
                 name, iso, unix_str = parts
@@ -840,6 +842,45 @@ class BranchService(BaseService):
         except Exception as e:
             logger.warning(f"_batch_branch_tips failed: {e}")
             return {}
+
+    def _batch_branch_divergence(self, base: str) -> dict[str, tuple[int, int]] | None:
+        """Ahead/behind for every branch from one ``git for-each-ref``; ``None``
+        when unavailable (git < 2.41) or unparseable — callers fall back."""
+        try:
+            result = self._run_git_command(
+                [
+                    "for-each-ref",
+                    f"--format=%(refname:lstrip=2)|%(ahead-behind:{base})",
+                    "refs/heads/",
+                ],
+                check=False,
+            )
+        except Exception as e:
+            logger.warning(f"_batch_branch_divergence({base}) failed: {e}")
+            return None
+
+        if result.returncode != 0:
+            logger.debug(
+                "batched ahead/behind unavailable for %r; using rev-list", base
+            )
+            return None
+
+        out: dict[str, tuple[int, int]] = {}
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # rpartition: a branch name may contain "|" (the counts never do).
+            name, sep, counts = line.rpartition("|")
+            parts = counts.split()
+            if not sep or not name or len(parts) != 2:
+                return None
+            try:
+                # "<ahead> <behind>" — the reverse of rev-list's order.
+                out[name] = (int(parts[0]), int(parts[1]))
+            except ValueError:
+                return None
+        return out
 
     def _get_branch_last_commit_iso(self, branch: str) -> str | None:
         """Return ISO timestamp of the tip commit of `branch`, or None."""
@@ -919,11 +960,17 @@ class BranchService(BaseService):
         # so the per-branch loop reads from memory instead of forking
         # ``git log -1`` twice per branch.
         tips = self._batch_branch_tips()
+        # Ahead/behind the same way: one for-each-ref for every branch.
+        # None (unavailable) falls back per branch below.
+        divergence = self._batch_branch_divergence(default)
 
         branches: list[dict] = []
         for name in info.branches:
-            div = self.get_divergence(name, base=default)
-            ahead = div["ahead"]
+            if divergence is not None and name in divergence:
+                ahead, behind = divergence[name]
+            else:
+                div = self.get_divergence(name, base=default)
+                ahead, behind = div["ahead"], div["behind"]
             synced = False
 
             tip = tips.get(name, {})
@@ -954,7 +1001,7 @@ class BranchService(BaseService):
                     "is_default": name == default,
                     "is_current": name == info.current,
                     "ahead": ahead,
-                    "behind": div["behind"],
+                    "behind": behind,
                     "keys_ahead": 0,
                     "last_commit_date": tip_iso,
                     "synced": synced,
